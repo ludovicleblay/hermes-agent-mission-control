@@ -1,4 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { prisma } from '@/lib/prisma';
+
+export const dynamic = 'force-dynamic';
+export const maxDuration = 120;
 
 interface AgentChatRequest {
   agentId: string;
@@ -11,20 +15,31 @@ interface AgentChatResponse {
   agentId: string;
 }
 
+// Personae des agents Le Blay — le chat est exécuté par Hermes via le bridge
+// (kind=chat → `hermes chat -Q -q`), AUCUN appel OpenRouter direct.
 const AGENT_PROMPTS: Record<string, string> = {
-  max: "You are Max 🐺, an AI executive assistant and COO-level strategist helping the user run their business. The user is a founder and content creator who runs AI trading bots. Be sharp, concise, strategic. Give real actionable advice.",
-  sage: "You are Sage 🌿, X/Twitter content specialist for the user. You write viral tweets in their voice — conversational, sharp, specific. Focus on hooks that make people stop scrolling. No fluff.",
-  knox: "You are Knox 🔐, operations and trading analyst for the user. You analyze Polymarket and Hyperliquid trading performance, spot patterns, suggest strategy improvements. Be data-driven and direct.",
-  nova: "You are Nova ⭐, YouTube strategy specialist for the user. You write scripts, hooks, thumbnails, titles. Think Mr Beast structure applied to the user's niche.",
-  pixel: "You are Pixel 🎨, web app product specialist for the user's products. You find UX improvements, feature ideas, competitor gaps. Think product manager + growth hacker.",
+  jarvis: "Tu es Jarvis 🧠, l'agent personnel de Ludo (famille Le Blay, Rueil-Malmaison). Tu gères l'infrastructure (Home-AI, Media-Center, HAOS), la maison (Home Assistant), la mémoire (Honcho local) et la veille tech quotidienne. Tu es le binôme de Toad 🍄 (assistant des enfants et de Corinne). Réponds en français, chaleureux mais direct, concis.",
+  toad: "Tu es Toad 🍄, l'assistant de la famille Le Blay — surtout des enfants (Alice, 13 ans, et Noémie, 10 ans) et de Corinne. Tu es le binôme de Jarvis 🧠 (agent technique et infrastructure). Ton ton est doux, patient, ludique et pédagogique. Réponds en français, simplement, avec bienveillance.",
 };
+
+const POLL_MS = 1500;
+const MAX_WAIT_MS = 90000;
+
+// Nettoyage de la sortie Hermes : retire la ligne-cadre « ┌─ Reasoning … ┐ »
+// (DeepSeek thinking s'affiche en préambule sur une seule ligne)
+function stripReasoning(raw: string): string {
+  const lines = raw.split(/\r?\n/);
+  if (lines[0] && lines[0].includes("┌─ Reasoning")) {
+    return lines.slice(1).join("\n").trim();
+  }
+  return raw.trim();
+}
 
 export async function POST(request: NextRequest): Promise<NextResponse<AgentChatResponse | { error: string }>> {
   try {
     const body: AgentChatRequest = await request.json();
     const { agentId, message, history = [] } = body;
 
-    // Validate inputs
     if (!agentId || !message) {
       return NextResponse.json(
         { error: 'Missing agentId or message' },
@@ -32,76 +47,50 @@ export async function POST(request: NextRequest): Promise<NextResponse<AgentChat
       );
     }
 
-    if (!AGENT_PROMPTS[agentId]) {
-      return NextResponse.json(
-        { error: `Unknown agent: ${agentId}` },
-        { status: 400 }
-      );
-    }
+    const persona = AGENT_PROMPTS[agentId] || AGENT_PROMPTS.jarvis;
 
-    const systemPrompt = AGENT_PROMPTS[agentId];
-    const apiKey = process.env.OPENROUTER_API_KEY;
+    // Construire le prompt : persona + historique + message courant
+    const historyBlock = history
+      .slice(-8)
+      .map((h) => `${h.role === 'user' ? 'Utilisateur' : agentId}: ${h.content}`)
+      .join('\n');
+    const prompt = `${persona}\n\nConversation récente :\n${historyBlock}\n\nMessage : ${message}\n\nRéponds en français, de façon concise et naturelle.`;
 
-    if (!apiKey) {
-      console.error('OPENROUTER_API_KEY not configured');
-      return NextResponse.json(
-        { error: 'API configuration error' },
-        { status: 500 }
-      );
-    }
-
-    // Build messages array: system prompt + history + current message
-    const messages = [
-      ...history,
-      { role: 'user' as const, content: message },
-    ];
-
-    // Call OpenRouter API
-    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-        'HTTP-Referer': 'https://your-app.vercel.app',
+    // Créer la requête — le bridge la prend (poll 5s) et l'exécute via Hermes
+    const req = await prisma.agentRequest.create({
+      data: {
+        origin: 'web',
+        kind: 'chat',
+        title: `Chat ${agentId}: ${message.slice(0, 80)}`,
+        prompt,
+        sideEffecting: false,
+        status: 'queued',
       },
-      body: JSON.stringify({
-        model: 'anthropic/claude-haiku-4-5',
-        messages: [
-          { role: 'system', content: systemPrompt },
-          ...messages,
-        ],
-        max_tokens: 800,
-      }),
     });
 
-    if (!response.ok) {
-      const error = await response.text();
-      console.error('OpenRouter API error:', error);
-      return NextResponse.json(
-        { error: 'Failed to get response from AI model' },
-        { status: 500 }
-      );
+    // Attendre le résultat (polling BDD)
+    const deadline = Date.now() + MAX_WAIT_MS;
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, POLL_MS));
+      const row = await prisma.agentRequest.findUnique({ where: { id: req.id } });
+      if (!row) break;
+      if (row.status === 'done' && row.result) {
+        return NextResponse.json({ reply: stripReasoning(row.result), agentId });
+      }
+      if (row.status === 'failed') {
+        return NextResponse.json(
+          { error: row.error || 'Agent request failed' },
+          { status: 502 }
+        );
+      }
     }
 
-    const data = await response.json();
-    const reply = data.choices?.[0]?.message?.content || '';
-
-    if (!reply) {
-      return NextResponse.json(
-        { error: 'No response from AI model' },
-        { status: 500 }
-      );
-    }
-
-    return NextResponse.json({
-      reply,
-      agentId,
-    });
-  } catch (error) {
-    console.error('Agent chat error:', error);
     return NextResponse.json(
-      { error: 'Internal server error' },
-      { status: 500 }
+      { error: 'Timeout — l’agent n’a pas répondu à temps' },
+      { status: 504 }
     );
+  } catch (e) {
+    console.error('agent-chat error:', e);
+    return NextResponse.json({ error: 'Failed to process request' }, { status: 500 });
   }
 }

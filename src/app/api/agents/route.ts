@@ -4,78 +4,77 @@ import { prisma } from "@/lib/prisma";
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
-// Default agent roster
-const DEFAULT_AGENTS = [
-  {
-    id: "max",
-    name: "Max",
-    emoji: "\uD83D\uDC3A",
-    role: "Chief of Staff \u00B7 Orchestrator",
-    status: "online",
-    tasksCompleted: 0,
-    totalCost: 0,
-    recentActivity: [],
-  },
-  {
-    id: "sage",
-    name: "Sage",
-    emoji: "\uD83C\uDF3F",
-    role: "X Content Specialist \u00B7 Trend Scout",
-    status: "idle",
-    tasksCompleted: 0,
-    totalCost: 0,
-    recentActivity: [],
-  },
-  {
-    id: "knox",
-    name: "Knox",
-    emoji: "\uD83D\uDD10",
-    role: "Trading Operations \u00B7 Bot Monitor",
-    status: "idle",
-    tasksCompleted: 0,
-    totalCost: 0,
-    recentActivity: [],
-  },
-  {
-    id: "nova",
-    name: "Nova",
-    emoji: "\u2B50",
-    role: "YouTube Strategy \u00B7 Content Research",
-    status: "idle",
-    tasksCompleted: 0,
-    totalCost: 0,
-    recentActivity: [],
-  },
-  {
-    id: "pixel",
-    name: "Pixel",
-    emoji: "\uD83C\uDFA8",
-    role: "Web App Specialist \u00B7 Product Ideas",
-    status: "idle",
-    tasksCompleted: 0,
-    totalCost: 0,
-    recentActivity: [],
-  },
-];
+// Roster 100 % dynamique : construit depuis les VRAIS profils Hermes
+// (mirrorés par le bridge dans DataStore key=hermes-profiles via `hermes profile list`).
+// Aucun agent codé en dur — si un profil est ajouté/supprimé, la page suit.
+
+// Emojis décoratifs par profil connu (le reste retombe sur 🤖)
+const EMOJIS: Record<string, string> = {
+  jarvis: "🧠",
+  toad: "🍄",
+  default: "⚙️",
+};
+
+const STATUS_LABEL: Record<string, string> = {
+  running: "online",
+  stopped: "offline",
+  paused: "idle",
+  unknown: "idle",
+};
 
 export async function GET() {
   try {
-    const states = await prisma.agentState.findMany();
+    const [store, states, events] = await Promise.all([
+      prisma.dataStore.findUnique({ where: { key: "hermes-profiles" } }),
+      prisma.agentState.findMany(),
+      prisma.agentEvent.findMany({ orderBy: { createdAt: "desc" }, take: 200 }),
+    ]);
+
     const stateMap: Record<string, any> = {};
-    for (const s of states) {
-      stateMap[s.id] = s;
+    for (const s of states) stateMap[s.id] = s;
+
+    // Dernière activité par agent (events du bridge)
+    const activityByAgent: Record<string, any[]> = {};
+    for (const e of events) {
+      const agent = e.agent || "hermes";
+      if (!activityByAgent[agent]) activityByAgent[agent] = [];
+      if (activityByAgent[agent].length < 5) activityByAgent[agent].push(e);
     }
 
-    const agents = DEFAULT_AGENTS.map((agent) => {
-      const s = stateMap[agent.id] || {};
+    const raw = store?.data as any;
+    const profiles = Array.isArray(raw?.profiles) ? raw.profiles : [];
+
+    const agents = profiles.map((p: any) => {
+      const id = p.id || p.name;
+      const s = stateMap[id] || {};
+      const recent = activityByAgent[id] || [];
+      const gatewayStatus = STATUS_LABEL[p.gateway] || "idle";
+
+      // Statut : priorité au state POST (bridge), sinon gateway, sinon activité
+      let status = s.status || gatewayStatus;
+      if (recent.length > 0 && status !== "offline") {
+        const ageMin = (Date.now() - new Date(recent[0].createdAt).getTime()) / 60000;
+        if (ageMin < 2) status = "working";
+      }
+
       return {
-        ...agent,
-        status: s.status || agent.status,
-        currentTask: s.currentTask || undefined,
-        lastActive: s.lastActive || undefined,
-        tasksCompleted: s.tasksCompleted || agent.tasksCompleted,
-        totalCost: s.totalCost || agent.totalCost,
-        recentActivity: s.recentActivity || agent.recentActivity,
+        id,
+        name: p.name || id,
+        emoji: EMOJIS[id] || "🤖",
+        role: p.alias ? `${p.alias} · ${p.model || "agent Hermes"}` : p.model || "Agent Hermes",
+        status,
+        currentTask: s.currentTask || (status === "working" ? recent[0]?.title : undefined),
+        lastActive: s.lastActive || recent[0]?.createdAt || undefined,
+        tasksCompleted: s.tasksCompleted || recent.filter((e) => e.kind === "run").length || 0,
+        totalCost: s.totalCost || 0,
+        recentActivity: recent.map((e) => ({
+          timestamp: e.createdAt.toISOString(),
+          action: e.title,
+          result: e.detail || undefined,
+        })),
+        gateway: p.gateway,
+        model: p.model,
+        isCurrent: !!p.isCurrent,
       };
     });
 
@@ -84,7 +83,7 @@ export async function GET() {
     });
   } catch (error) {
     console.error("Agents API error:", error);
-    return NextResponse.json(DEFAULT_AGENTS, { status: 200 });
+    return NextResponse.json([], { status: 200 });
   }
 }
 
@@ -98,50 +97,22 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "agentId required" }, { status: 400 });
     }
 
-    // Find the default agent info for name/emoji/role
-    const defaultAgent = DEFAULT_AGENTS.find((a) => a.id === agentId);
+    const existing = await prisma.agentState.findUnique({ where: { id: agentId } });
+    const data = {
+      name: agentId,
+      status: status || existing?.status || "idle",
+      currentTask: currentTask !== undefined ? currentTask : existing?.currentTask,
+      lastActive: new Date(),
+      ...(action === "complete" ? { tasksCompleted: (existing?.tasksCompleted || 0) + 1 } : {}),
+    };
 
-    // Get existing state or create defaults
-    let existing = await prisma.agentState.findUnique({ where: { id: agentId } });
+    const state = existing
+      ? await prisma.agentState.update({ where: { id: agentId }, data })
+      : await prisma.agentState.create({ data: { id: agentId, ...data } });
 
-    const recentActivity = (existing?.recentActivity as any[]) || [];
-    const newRecentActivity = action
-      ? [
-          { timestamp: new Date().toISOString(), action },
-          ...recentActivity.slice(0, 19),
-        ]
-      : recentActivity;
-
-    const updatedState = await prisma.agentState.upsert({
-      where: { id: agentId },
-      update: {
-        ...(status ? { status } : {}),
-        ...(currentTask !== undefined ? { currentTask } : {}),
-        lastActive: new Date(),
-        ...(action
-          ? {
-              recentActivity: newRecentActivity,
-              tasksCompleted: (existing?.tasksCompleted || 0) + 1,
-            }
-          : {}),
-      },
-      create: {
-        id: agentId,
-        name: defaultAgent?.name || agentId,
-        emoji: defaultAgent?.emoji,
-        role: defaultAgent?.role,
-        status: status || "idle",
-        currentTask: currentTask || null,
-        lastActive: new Date(),
-        tasksCompleted: action ? 1 : 0,
-        totalCost: 0,
-        recentActivity: newRecentActivity,
-      },
-    });
-
-    return NextResponse.json({ ok: true, agent: updatedState });
+    return NextResponse.json({ ok: true, state });
   } catch (error) {
-    console.error("Agent update error:", error);
-    return NextResponse.json({ error: "Failed to update" }, { status: 500 });
+    console.error("Agent state update error:", error);
+    return NextResponse.json({ error: "failed" }, { status: 500 });
   }
 }
