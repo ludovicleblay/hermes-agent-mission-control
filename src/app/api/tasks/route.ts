@@ -25,25 +25,36 @@ async function vikunjaFetch(path: string, method: string, body?: unknown) {
 const PRIORITY_LABEL: Record<number, string> = { 0: "none", 1: "low", 2: "medium", 3: "high", 4: "urgent" };
 
 // GET /api/tasks — liste des tâches de tous les projets + projets
+// NB : GET /tasks global de Vikunja est tronqué (50/page, trié bizarrement)
+// → on liste projet par projet pour TOUT récupérer.
 export async function GET() {
   try {
-    const [projectsRes, tasksRes] = await Promise.all([
-      vikunjaFetch("/projects", "GET"),
-      vikunjaFetch("/tasks", "GET"),
-    ]);
-    if (projectsRes.status >= 400 || tasksRes.status >= 400) {
+    const projectsRes = await vikunjaFetch("/projects", "GET");
+    if (projectsRes.status >= 400) {
       return NextResponse.json({ error: "Vikunja unreachable", detail: projectsRes.data }, { status: 502 });
     }
     const projects = (projectsRes.data as Array<Record<string, unknown>>) ?? [];
-    const tasks = (tasksRes.data as Array<Record<string, unknown>>) ?? [];
-
     const projectNames = new Map<number, string>();
     for (const p of projects) {
       const id = Number(p.id);
       if (id && p.title) projectNames.set(id, String(p.title));
     }
 
-    const items = tasks.map((t) => ({
+    // Récupère les tâches de chaque projet (3 pages de 250 max par projet)
+    const allTasks: Array<Record<string, unknown>> = [];
+    for (const p of projects) {
+      const pid = Number(p.id);
+      for (let page = 1; page <= 3; page++) {
+        const res = await vikunjaFetch(`/projects/${pid}/tasks?page=${page}&per_page=250`, "GET");
+        if (res.status >= 400) break;
+        const batch = (res.data as Array<Record<string, unknown>>) ?? [];
+        if (batch.length === 0) break;
+        allTasks.push(...batch);
+        if (batch.length < 250) break;
+      }
+    }
+
+    const items = allTasks.map((t) => ({
       id: Number(t.id),
       title: String(t.title ?? ""),
       description: String(t.description ?? ""),
