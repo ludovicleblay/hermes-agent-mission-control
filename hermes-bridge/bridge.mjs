@@ -48,7 +48,8 @@ if (DB_URL.startsWith("prisma://") || DB_URL.startsWith("prisma+")) {
   process.exit(1);
 }
 // Cloud Postgres (Prisma Postgres/Neon/Supabase/RDS) needs SSL; localhost doesn't.
-const isLocal = /@(localhost|127\.0\.0\.1)/.test(DB_URL);
+// [PATCH LeBlay] + hermyhq-postgres : Postgres dédié local (réseau docker hermyhq) sans SSL.
+const isLocal = /@(localhost|127\.0\.0\.1|hermyhq-postgres)/.test(DB_URL);
 const pool = new pg.Pool({ connectionString: DB_URL, max: 4, ssl: isLocal ? undefined : { rejectUnauthorized: false } });
 
 const log = (...a) => console.log(new Date().toISOString(), ...a);
@@ -214,7 +215,7 @@ async function gitCommitWiki(msg) {
 
 /* ─────────────── Chief-of-staff daily brief ─────────────── */
 async function generateBriefing() {
-  const raw = (await hermes(["-z", BRIEF_PROMPT], { timeout: RUN_TIMEOUT_MS })).trim();
+  const raw = (await hermes(["chat", "-Q", "-q", BRIEF_PROMPT], { timeout: RUN_TIMEOUT_MS })).trim();
   let brief;
   try {
     const jsonStr = raw.replace(/^```(?:json)?/i, "").replace(/```$/, "").trim();
@@ -241,7 +242,7 @@ async function runRequest(r) {
   try {
     let result = "";
     if (r.kind === "oneshot" || r.kind === "chat") {
-      result = (await hermes(["-z", r.prompt || r.title], { timeout: RUN_TIMEOUT_MS })).trim();
+      result = (await hermes(["chat", "-Q", "-q", r.prompt || r.title], { timeout: RUN_TIMEOUT_MS })).trim();
     } else if (r.kind === "kanban") {
       result = (await hermes(["kanban", "--board", BOARD, "create", "--json", r.title], { timeout: 20000 })).trim();
     } else if (r.kind.startsWith("cron.")) {
