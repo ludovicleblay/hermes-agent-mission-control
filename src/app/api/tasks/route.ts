@@ -67,9 +67,11 @@ export async function GET() {
       createdAt: String(t.created ?? ""),
     }));
 
-    return NextResponse.json({ items, projects: projects.map((p) => ({ id: Number(p.id), title: String(p.title) })) });
+    return NextResponse.json({ items, projects: projects.map((p) => ({ id: Number(p.id), title: String(p.title) })) }, {
+      headers: { "Cache-Control": "no-store, max-age=0" },
+    });
   } catch (e) {
-    return NextResponse.json({ error: `Vikunja unreachable: ${(e as Error).message}` }, { status: 502 });
+    return NextResponse.json({ error: `Vikunja unreachable: ${(e as Error).message}` }, { status: 502, headers: { "Cache-Control": "no-store, max-age=0" } });
   }
 }
 
