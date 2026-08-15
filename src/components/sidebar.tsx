@@ -14,7 +14,7 @@ import {
   ClipboardList,
   HeartPulse,
   Cpu,
-  BookOpen,
+  Brain,
   Workflow,
   Menu,
   X,
@@ -48,7 +48,7 @@ const navGroups = [
     name: "System",
     items: [
       { href: "/agents", label: "Agents", icon: Bot },
-      { href: "/memory-wiki", label: "Memory Wiki", icon: BookOpen },
+      { href: "/memory-dialectic", label: "Mémoire Dialectic", icon: Brain },
       { href: "/ideas", label: "Ideas", icon: Lightbulb },
       { href: "/garden", label: "Garden", icon: Flower2 },
     ],
