@@ -6,8 +6,6 @@ import { useState, useEffect } from "react";
 import {
   Home,
   Bot,
-  Lightbulb,
-  Flower2,
   ClipboardList,
   HeartPulse,
   Cpu,
@@ -36,8 +34,6 @@ const navGroups = [
     items: [
       { href: "/agents", label: "Agents", icon: Bot },
       { href: "/memory-dialectic", label: "Mémoire Dialectic", icon: Brain },
-      { href: "/ideas", label: "Ideas", icon: Lightbulb },
-      { href: "/garden", label: "Garden", icon: Flower2 },
     ],
   },
 ];

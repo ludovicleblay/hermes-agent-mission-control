@@ -1,205 +1,168 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { Button, Pill, rise } from "@/components/ui/kit";
+import { useEffect, useState, useCallback } from "react";
+import { CheckCircle2, Circle, Clock, FolderKanban, CalendarDays, ListTodo } from "lucide-react";
+import { Panel, Pill, Skeleton, EmptyState, rise } from "@/components/ui/kit";
 
 interface Task {
-  id: string;
-  name: string;
-  status: string;
+  id: number;
+  title: string;
+  description: string;
+  done: boolean;
+  dueDate: string | null;
   priority: string;
-  category: string;
-  dueDate?: string;
+  priorityRaw: number;
+  project: string;
+  projectId: number;
+  created: string | null;
 }
 
-const columns = [
-  { id: "Not started", label: "To Do" },
-  { id: "Approved", label: "Approved" },
-  { id: "In progress", label: "In Progress" },
-  { id: "Done", label: "Done" },
-];
+interface Project {
+  id: number;
+  title: string;
+}
+
+const PRIORITY_TONE: Record<string, string> = {
+  Critical: "var(--hq-down)",
+  Urgent: "var(--hq-down)",
+  High: "var(--hq-warn)",
+  Medium: "var(--hq-warn)",
+  Low: "var(--hq-text-faint)",
+  None: "var(--hq-text-ghost)",
+};
+
+const STATUS_PILL: Record<string, { label: string; tone: string }> = {
+  todo: { label: "À faire", tone: "accent" },
+  doing: { label: "En cours", tone: "warn" },
+  done: { label: "Terminé", tone: "up" },
+};
+
+function fmtDate(d: string | null) {
+  if (!d) return "";
+  try {
+    return new Date(d).toLocaleDateString("fr-FR", { day: "numeric", month: "short" });
+  } catch {
+    return "";
+  }
+}
 
 export default function TasksPage() {
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(true);
-  const [newTask, setNewTask] = useState("");
-  const [showAddTask, setShowAddTask] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [filter, setFilter] = useState<"open" | "done" | "all">("open");
+  const [projectFilter, setProjectFilter] = useState<number | null>(null);
 
-  useEffect(() => {
-    fetchTasks();
-  }, []);
-
-  async function fetchTasks() {
+  const fetchTasks = useCallback(async () => {
     try {
       const res = await fetch("/api/tasks");
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       setTasks(data.tasks || []);
-    } catch (e) {
-      console.error("Failed to fetch tasks", e);
+      setProjects(data.projects || []);
+    } catch (e: any) {
+      setError(e.message);
     } finally {
       setLoading(false);
     }
-  }
+  }, []);
 
-  async function addTask() {
-    if (!newTask.trim()) return;
-    try {
-      await fetch("/api/tasks", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: newTask, status: "Not started" }),
-      });
-      setNewTask("");
-      setShowAddTask(false);
-      fetchTasks();
-    } catch (e) {
-      console.error("Failed to add task", e);
-    }
-  }
+  useEffect(() => { fetchTasks(); }, [fetchTasks]);
 
-  async function updateTaskStatus(taskId: string, newStatus: string) {
-    try {
-      await fetch("/api/tasks", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id: taskId, status: newStatus }),
-      });
-      fetchTasks();
-    } catch (e) {
-      console.error("Failed to update task", e);
-    }
-  }
+  const visible = tasks.filter((t) => {
+    if (filter === "open" && t.done) return false;
+    if (filter === "done" && !t.done) return false;
+    if (projectFilter && t.projectId !== projectFilter) return false;
+    return true;
+  });
 
-  if (loading) {
-    return (
-      <>
-        <div className="relative z-10 w-full mx-auto pt-4">
-          <div className="flex justify-between items-center mb-10">
-            <div>
-              <div className="sk h-3 w-20 mb-3" />
-              <div className="sk h-7 w-28" />
-            </div>
-            <div className="sk h-9 w-28 rounded-full" />
-          </div>
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
-            {[...Array(4)].map((_, i) => (
-              <div key={i} className="panel p-4">
-                <div className="sk h-4 w-16 mb-4" />
-                <div className="space-y-2">
-                  {[...Array(i + 1)].map((_, j) => <div key={j} className="sk h-16 rounded-[var(--r-md)]" />)}
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      </>
-    );
-  }
+  const openCount = tasks.filter((t) => !t.done).length;
+  const doneCount = tasks.length - openCount;
+  const projectCounts = new Map<number, number>();
+  for (const t of tasks) if (!t.done) projectCounts.set(t.projectId, (projectCounts.get(t.projectId) || 0) + 1);
 
   return (
     <>
-      <div className="relative z-10 h-full flex flex-col w-full mx-auto pt-4 pb-16">
-        <div className="hq-rise flex justify-between items-end gap-4 mb-10" style={rise(0)}>
-          <div>
-            <div className="eyebrow mb-2">Synced with Notion</div>
-            <h1 className="text-[32px] font-semibold tracking-[-0.025em] leading-none text-[var(--text)]">Tasks</h1>
-          </div>
-          <Button variant="primary" onClick={() => setShowAddTask(true)}>+ Add Task</Button>
+      <div className="hq-rise pt-4 pb-10" style={rise(0)}>
+        <div className="eyebrow mb-2.5">Vikunja</div>
+        <h1 className="text-[40px] font-semibold tracking-[-0.025em] leading-none text-[var(--hq-text)]">Tâches</h1>
+        <p className="text-[var(--hq-text-ghost)] text-[13px] mt-3">
+          {openCount} ouvertes · {doneCount} terminées
+        </p>
+      </div>
+
+      {/* Filtres */}
+      <div className="flex flex-wrap items-center gap-2 mb-6">
+        {(["open", "done", "all"] as const).map((f) => (
+          <button key={f} onClick={() => setFilter(f)}
+            className={`px-3.5 py-1.5 rounded-full text-[12px] font-medium num transition-colors ${
+              filter === f ? "bg-[var(--hq-text)] text-[var(--hq-bg)]" : "border border-[var(--hq-hairline)] text-[var(--hq-text-dim)] hover:border-[var(--hq-text-faint)]"
+            }`}>
+            {f === "open" ? "Ouvertes" : f === "done" ? "Terminées" : "Toutes"}
+          </button>
+        ))}
+
+        <span className="w-px h-5 bg-[var(--hq-hairline)] mx-1" />
+
+        {projects.map((p) => {
+          const active = projectFilter === p.id;
+          const n = projectCounts.get(p.id) || 0;
+          return (
+            <button key={p.id} onClick={() => setProjectFilter(active ? null : p.id)}
+              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[12px] transition-colors ${
+                active ? "bg-[var(--accent)] text-[var(--hq-bg)]" : "border border-[var(--hq-hairline)] text-[var(--hq-text-dim)] hover:border-[var(--hq-text-faint)]"
+              }`}>
+              <FolderKanban className="w-3.5 h-3.5" />
+              {p.title}
+              {n > 0 && <span className="num opacity-70">({n})</span>}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Liste */}
+      {loading ? (
+        <div className="space-y-2">
+          {[0, 1, 2, 3, 4].map((i) => <Skeleton key={i} className="h-14 rounded-xl" />)}
         </div>
-
-        {showAddTask && (
-          <div className="hq-rise elevated mb-8 p-5">
-            <input
-              type="text"
-              value={newTask}
-              onChange={(e) => setNewTask(e.target.value)}
-              placeholder="What needs to be done?"
-              className="w-full bg-[var(--surface-1)] border border-[var(--line)] text-[var(--text)] placeholder-[var(--text-3)] rounded-[var(--r-md)] px-4 py-3 mb-3 text-[14px] focus:outline-none focus:border-[var(--line-strong)]"
-              onKeyDown={(e) => e.key === "Enter" && addTask()}
-              autoFocus
-            />
-            <div className="flex gap-2">
-              <Button variant="primary" onClick={addTask}>Add Task</Button>
-              <Button variant="ghost" onClick={() => setShowAddTask(false)}>Cancel</Button>
-            </div>
-          </div>
-        )}
-
-        <div className="flex-1 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5 overflow-hidden">
-          {columns.map((column, idx) => {
-            const count = tasks.filter((t) => t.status === column.id).length;
-            return (
-              <div key={column.id} className="hq-rise panel flex flex-col overflow-hidden" style={rise(idx + 1)}>
-                <div className="px-4 py-3.5 flex items-center justify-between">
-                  <span className="eyebrow">{column.label}</span>
-                  <span className="num text-[11px] text-[var(--text-3)]">{count}</span>
-                </div>
-                <div className="rule" />
-                <div className="flex-1 p-2.5 space-y-2 overflow-y-auto">
-                  {tasks
-                    .filter((t) => t.status === column.id)
-                    .map((task) => (
-                      <TaskCard
-                        key={task.id}
-                        task={task}
-                        done={column.id === "Done"}
-                        onStatusChange={(status) => updateTaskStatus(task.id, status)}
-                      />
-                    ))}
-                  {count === 0 && (
-                    <p className="text-[var(--text-4)] text-[12.5px] text-center py-8">No tasks</p>
+      ) : error ? (
+        <Panel className="p-8"><EmptyState icon={<ListTodo className="w-5 h-5" />} title={`Vikunja inaccessible : ${error}`} /></Panel>
+      ) : visible.length === 0 ? (
+        <Panel className="p-8"><EmptyState icon={<CheckCircle2 className="w-5 h-5" />} title="Aucune tâche ici." /></Panel>
+      ) : (
+        <div className="space-y-2">
+          {visible.map((t, i) => (
+            <div key={t.id} className="hq-rise panel flex items-start gap-3.5 p-4" style={rise(Math.min(i + 1, 8))}>
+              {t.done ? (
+                <CheckCircle2 className="w-4.5 h-4.5 shrink-0 mt-0.5" style={{ color: "var(--hq-up)" }} />
+              ) : (
+                <Circle className="w-4.5 h-4.5 shrink-0 mt-0.5" style={{ color: "var(--hq-text-faint)" }} />
+              )}
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-[14px] font-medium text-[var(--hq-text)] leading-snug">{t.title}</span>
+                  <Pill tone="neutral" className="!text-[10px]">{t.project}</Pill>
+                  {t.priorityRaw > 0 && (
+                    <span className="inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium num border border-[var(--hq-hairline)]"
+                      style={{ color: PRIORITY_TONE[t.priority] }}>{t.priority}</span>
                   )}
                 </div>
+                {t.description && (
+                  <p className="text-[12.5px] text-[var(--hq-text-ghost)] mt-1 line-clamp-2">{t.description}</p>
+                )}
+                {t.dueDate && (
+                  <div className="flex items-center gap-1 mt-1.5">
+                    <CalendarDays className="w-3 h-3" style={{ color: "var(--hq-text-faint)" }} />
+                    <span className="num text-[11px] text-[var(--hq-text-faint)]">échéance {fmtDate(t.dueDate)}</span>
+                  </div>
+                )}
               </div>
-            );
-          })}
-        </div>
-      </div>
-    </>
-  );
-}
-
-function TaskCard({
-  task,
-  done,
-  onStatusChange,
-}: {
-  task: Task;
-  done?: boolean;
-  onStatusChange: (status: string) => void;
-}) {
-  const priorityTone: Record<string, "warn" | "neutral"> = {
-    High: "warn",
-    Medium: "neutral",
-    Low: "neutral",
-  };
-
-  return (
-    <div className="rounded-[var(--r-md)] border border-[var(--line)] bg-[var(--surface-1)] p-3.5 transition-colors hover:border-[var(--line-strong)] hover:bg-[var(--surface-2)] cursor-pointer group">
-      <p className={`font-medium text-[13px] mb-3 leading-relaxed ${done ? "text-[var(--text-3)] line-through" : "text-[var(--text)]"}`}>
-        {task.name}
-      </p>
-      <div className="flex items-center gap-2 flex-wrap">
-        {task.priority && (
-          <Pill tone={priorityTone[task.priority] || "neutral"}>{task.priority}</Pill>
-        )}
-        {task.category && (
-          <span className="text-[11px] text-[var(--text-3)]">{task.category}</span>
-        )}
-      </div>
-      <div className="mt-3 pt-3 border-t border-[var(--line)] opacity-0 group-hover:opacity-100 transition-opacity">
-        <select
-          className="text-[12px] bg-[var(--surface-1)] text-[var(--text-2)] rounded-[var(--r-sm)] px-3 py-2 w-full border border-[var(--line)] focus:outline-none focus:border-[var(--line-strong)]"
-          value={task.status}
-          onChange={(e) => onStatusChange(e.target.value)}
-        >
-          {columns.map((col) => (
-            <option key={col.id} value={col.id}>
-              Move to {col.label}
-            </option>
+              <span className="num text-[10.5px] text-[var(--hq-text-ghost)] shrink-0 mt-0.5">#{t.id}</span>
+            </div>
           ))}
-        </select>
-      </div>
-    </div>
+        </div>
+      )}
+    </>
   );
 }

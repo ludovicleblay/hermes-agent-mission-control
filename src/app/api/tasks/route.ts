@@ -1,117 +1,87 @@
 import { NextResponse } from "next/server";
 
-// This would connect to Notion API
-// For now, return mock data
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
-const NOTION_API_KEY = process.env.NOTION_API_KEY;
-const DATABASE_ID = "1264208d-f768-4604-b4cb-09f4d6fd41e3"; // Max's Tasks DB
+const VIKUNJA_URL = process.env.VIKUNJA_URL || "http://192.168.68.87:8082/api/v1";
+const VIKUNJA_TOKEN = process.env.VIKUNJA_API_TOKEN || "";
+
+interface VTask {
+  id: number;
+  title: string;
+  description?: string;
+  done: boolean;
+  due_date?: string;
+  priority?: number;
+  project_id: number;
+  created?: string;
+}
+
+interface VProject {
+  id: number;
+  title: string;
+}
+
+const PRIORITY_LABELS: Record<number, string> = {
+  0: "Low",
+  1: "Medium",
+  2: "High",
+  3: "Urgent",
+  4: "Critical",
+};
+
+async function vk(path: string) {
+  const res = await fetch(`${VIKUNJA_URL}${path}`, {
+    headers: { Authorization: `Bearer ${VIKUNJA_TOKEN}` },
+    cache: "no-store",
+  });
+  if (!res.ok) throw new Error(`Vikunja ${path}: ${res.status}`);
+  return res.json();
+}
 
 export async function GET() {
   try {
-    if (!NOTION_API_KEY) {
-      // Return mock data if no API key
-      return NextResponse.json({
-        tasks: [
-          { id: "1", name: "Review Polymarket bot strategy", status: "In progress", priority: "High", category: "Research" },
-          { id: "2", name: "Build Hermy HQ dashboard", status: "In progress", priority: "High", category: "Content" },
-          { id: "3", name: "Daily brief automation", status: "Approved", priority: "Medium", category: "Admin" },
-        ],
-      });
+    if (!VIKUNJA_TOKEN) {
+      return NextResponse.json({ error: "VIKUNJA_API_TOKEN non configuré" }, { status: 500 });
     }
 
-    const res = await fetch(`https://api.notion.com/v1/databases/${DATABASE_ID}/query`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${NOTION_API_KEY}`,
-        "Notion-Version": "2022-06-28",
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        filter: {
-          property: "Status",
-          status: {
-            does_not_equal: "Done",
-          },
-        },
-      }),
+    const [projects, tasks] = await Promise.all([
+      vk("/projects"),
+      vk("/tasks?sort_by=updated&order_by=desc&page=1&per_page=100"),
+    ]);
+
+    const projectMap = new Map<number, string>();
+    for (const p of projects as VProject[]) projectMap.set(p.id, p.title);
+
+    const items = (tasks as VTask[]).map((t) => ({
+      id: t.id,
+      title: t.title,
+      description: t.description || "",
+      done: t.done,
+      dueDate: t.due_date || null,
+      priority: t.priority != null ? PRIORITY_LABELS[t.priority] || "Low" : "None",
+      priorityRaw: t.priority ?? 0,
+      project: projectMap.get(t.project_id) || `Projet ${t.project_id}`,
+      projectId: t.project_id,
+      created: t.created || null,
+    }));
+
+    // tri : non-done d'abord, puis priorité décroissante, puis updated
+    items.sort((a, b) => {
+      if (a.done !== b.done) return a.done ? 1 : -1;
+      if (b.priorityRaw !== a.priorityRaw) return b.priorityRaw - a.priorityRaw;
+      return 0;
     });
 
-    const data = await res.json();
-    
-    const tasks = data.results?.map((page: any) => ({
-      id: page.id,
-      name: page.properties.Name?.title?.[0]?.plain_text || "Untitled",
-      status: page.properties.Status?.status?.name || "Not started",
-      priority: page.properties.Priority?.select?.name || "",
-      category: page.properties.Category?.select?.name || "",
-      dueDate: page.properties["Due Date"]?.date?.start || null,
-    })) || [];
-
-    return NextResponse.json({ tasks });
-  } catch (error) {
-    console.error("Tasks API error:", error);
-    return NextResponse.json({ error: "Failed to fetch tasks" }, { status: 500 });
-  }
-}
-
-export async function POST(req: Request) {
-  try {
-    const { name, status } = await req.json();
-    
-    if (!NOTION_API_KEY) {
-      return NextResponse.json({ success: true, message: "Mock - would create task in Notion" });
-    }
-
-    const res = await fetch("https://api.notion.com/v1/pages", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${NOTION_API_KEY}`,
-        "Notion-Version": "2022-06-28",
-        "Content-Type": "application/json",
+    return NextResponse.json({
+      projects: projects.map((p: VProject) => ({ id: p.id, title: p.title })),
+      tasks: items,
+      counts: {
+        open: items.filter((t) => !t.done).length,
+        done: items.filter((t) => t.done).length,
       },
-      body: JSON.stringify({
-        parent: { database_id: DATABASE_ID },
-        properties: {
-          Name: { title: [{ text: { content: name } }] },
-          Status: { status: { name: status || "Not started" } },
-        },
-      }),
     });
-
-    const data = await res.json();
-    return NextResponse.json({ success: true, task: data });
-  } catch (error) {
-    console.error("Create task error:", error);
-    return NextResponse.json({ error: "Failed to create task" }, { status: 500 });
-  }
-}
-
-export async function PATCH(req: Request) {
-  try {
-    const { id, status } = await req.json();
-    
-    if (!NOTION_API_KEY) {
-      return NextResponse.json({ success: true, message: "Mock - would update task in Notion" });
-    }
-
-    const res = await fetch(`https://api.notion.com/v1/pages/${id}`, {
-      method: "PATCH",
-      headers: {
-        Authorization: `Bearer ${NOTION_API_KEY}`,
-        "Notion-Version": "2022-06-28",
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        properties: {
-          Status: { status: { name: status } },
-        },
-      }),
-    });
-
-    const data = await res.json();
-    return NextResponse.json({ success: true, task: data });
-  } catch (error) {
-    console.error("Update task error:", error);
-    return NextResponse.json({ error: "Failed to update task" }, { status: 500 });
+  } catch (e: any) {
+    return NextResponse.json({ error: `Vikunja unreachable: ${e.message}` }, { status: 502 });
   }
 }
