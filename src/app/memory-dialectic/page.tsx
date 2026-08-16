@@ -321,13 +321,13 @@ export default function MemoryDialecticPage() {
         // (ex. jarvis→ludo : GET /peers/jarvis/card?target=ludo — même mécanique
         // que l'outil honcho_profile d'Hermes)
         const direct = await api<CardResponse>("card", { workspace: ws, peer });
-        const d = direct?.card ?? direct?.peer_card ?? direct;
-        if (d && (Array.isArray(d) ? d.length > 0 : String(d).trim().length > 0)) return direct;
+        const d = direct?.peer_card ?? direct?.card;
+        if (Array.isArray(d) ? d.length > 0 : d && String(d).trim().length > 0) return direct;
         for (const obs of ["jarvis", "hermes", "ai", peer]) {
           if (obs === peer) continue;
           const fb = await api<CardResponse>("card", { workspace: ws, peer: obs, target: peer }).catch(() => null);
-          const val = fb?.card ?? fb?.peer_card ?? fb;
-          if (val && (Array.isArray(val) ? val.length > 0 : String(val).trim().length > 0)) return fb;
+          const val = fb?.peer_card ?? fb?.card;
+          if (Array.isArray(val) ? val.length > 0 : val && String(val).trim().length > 0) return fb;
         }
         return direct;
       })(),
