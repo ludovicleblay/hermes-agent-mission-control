@@ -57,7 +57,12 @@ const ACTIONS: Record<string, { path: (p: Record<string, string>) => string; met
     method: "GET",
   },
   card: {
-    path: (p) => `/v3/workspaces/${p.workspace}/peers/${p.peer}/card`,
+    path: (p) => {
+      // Card d'un peer ; si target est fourni → card locale de l'observateur
+      // sur la cible (ex. jarvis→ludo : GET /peers/jarvis/card?target=ludo)
+      const base = `/v3/workspaces/${p.workspace}/peers/${p.peer}/card`;
+      return p.target ? `${base}?target=${encodeURIComponent(p.target)}` : base;
+    },
     method: "GET",
   },
   context: {
