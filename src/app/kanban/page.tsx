@@ -112,7 +112,7 @@ function TaskDetail({ task, onClose, onValidated }: { task: Task; onClose: () =>
   })();
 
   return (
-    <Panel className="p-5 sticky top-4 max-h-[calc(100vh-2rem)] overflow-y-auto">
+    <Panel className="p-5">
       <div className="flex items-start justify-between gap-3 mb-3">
         <div className="flex items-center gap-2 flex-wrap">
           <Pill tone={task.status === "blocked" ? "warn" : "neutral"}>{task.status}</Pill>
@@ -425,17 +425,18 @@ export default function KanbanPage() {
           ))}
         </div>
       ) : (
-        <div className="grid grid-cols-1 lg:grid-cols-[1fr_360px] gap-5 items-start mt-12">
+        <div className="flex flex-col gap-6 mt-12">
+          {/* Board : cartes par statut */}
           <Board tasks={tasks} selectedId={selectedId} onSelect={setSelectedId} />
-          <div>
-            {selected ? (
-              <TaskDetail task={selected} onClose={() => setSelectedId(null)} onValidated={load} />
-            ) : (
-              <Panel className="p-5 text-[13px] text-[var(--text-3)]">
-                Clique sur une carte pour lire les instructions, les commentaires et la raison du blocage avant de valider.
-              </Panel>
-            )}
-          </div>
+
+          {/* Détail de la carte sélectionnée (pleine largeur, sous le board) */}
+          {selected ? (
+            <TaskDetail task={selected} onClose={() => setSelectedId(null)} onValidated={load} />
+          ) : (
+            <Panel className="p-5 text-[13px] text-[var(--text-3)]">
+              Clique sur une carte pour lire les instructions, les commentaires et la raison du blocage avant de valider.
+            </Panel>
+          )}
         </div>
       )}
     </div>
