@@ -35,11 +35,12 @@ const navGroups = [
   },
 ];
 
-// Mobile tab bar - Dashboard / Kanban / Tasks (Hermes & Agents retirés, décision Ludo 16/08)
+// Mobile tab bar - Dashboard / Kanban / Tasks / Briefs (Hermes & Agents retirés, décision Ludo 16/08)
 const mobileTabsRaw = [
   { href: "/", label: "Dashboard", icon: Home },
   { href: "/kanban", label: "Kanban", icon: LayoutGrid },
   { href: "/tasks", label: "Tasks", icon: ClipboardList },
+  { href: "/briefs", label: "Briefs", icon: Newspaper },
 ];
 
 export function Sidebar() {
