@@ -32,14 +32,73 @@ const MIRROR_MS = Number(process.env.BRIDGE_MIRROR_MS || 30000);
 const RUN_TIMEOUT_MS = Number(process.env.BRIDGE_RUN_TIMEOUT_MS || 240000);
 const WIKI_DIR = process.env.HERMES_WIKI || path.join(os.homedir(), ".hermes", "wiki");
 const BRIEF_HOUR = Number(process.env.BRIEF_HOUR || 8);   // local hour to auto-generate the daily brief
-const BRIEF_PROMPT =
-  "You are the operator's chief of staff. Produce today's brief. Read your memory wiki open-loops " +
-  "(~/.hermes/wiki), the kanban board, and recent activity. Output ONLY valid JSON (no prose, no code fences) " +
-  'in exactly this shape: {"greeting":"one warm line","summary":"2-3 sentences on where things stand",' +
-  '"sections":[{"label":"Needs your decision","items":["..."]},{"label":"Top priorities","items":["..."]},' +
-  '{"label":"Recently shipped","items":["..."]},{"label":"Next actions","items":["..."]}]}. ' +
-  "Keep every item short, concrete, and specific. Omit a section if it has nothing.";
 let lastBriefDate = null;
+
+// Prompt du brief — le modèle est appelé SANS outils (chat simple) : il ne peut
+// RIEN lire lui-même. Toutes les données réelles (kanban, activité, dernier brief)
+// sont donc injectées DANS le prompt par collectBriefContext(). Plus aucune consigne
+// de lecture wiki : le wiki ~/.hermes/wiki est abandonné (remplacé par Outline +
+// MEMORY.md + Honcho). Le brief est en français (langue de Ludo).
+function buildBriefPrompt(ctx) {
+  const kanbanTxt = (ctx.kanban || "Aucune carte active.")
+    .split("\n").slice(0, 60).join("\n");
+  const activityTxt = (ctx.activity || "Aucune activité récente.")
+    .split("\n").slice(0, 30).join("\n");
+  const lastBriefTxt = (ctx.lastBrief || "Aucun brief précédent.")
+    .split("\n").slice(0, 40).join("\n");
+  return (
+    "Tu es le chief of staff technique de Ludo (maison Le Blay, infra self-hosted : Home-AI, " +
+    "Media-Center, HAOS, Hermes). Produis le brief du jour en français à partir des DONNÉES " +
+    "fournies ci-dessous (kanban Hermes + activité récente). Tu n'as accès à AUCUN outil, " +
+    "fichier, wiki ou commande : base-toi uniquement sur ces données, ne les invente pas. " +
+    "Output ONLY valid JSON (no prose, no code fences, no markdown) " +
+    'in exactly this shape: {"greeting":"une ligne chaleureuse en français","summary":"2-3 phrases sur l\'état des lieux",' +
+    '"sections":[{"label":"À décider","items":["..."]},{"label":"Priorités","items":["..."]},' +
+    '{"label":"Récemment livré","items":["..."]},{"label":"Prochaines actions","items":["..."]}]}. ' +
+    "Chaque item court, concret, spécifique, factuel (tiré des données). " +
+    "Omets une section si elle n'a rien à mettre. " +
+    "Le summary doit refléter les vrais faits : cartes en cours, blocages, livraisons récentes.\n\n" +
+    "=== DONNÉES KANBAN (cartes actives) ===\n" + kanbanTxt + "\n\n" +
+    "=== ACTIVITÉ RÉCENTE (24h) ===\n" + activityTxt + "\n\n" +
+    "=== DERNIER BRIEF (à ne pas répéter — éviter la redite) ===\n" + lastBriefTxt
+  );
+}
+
+// Récupère les données réelles pour le brief : cartes kanban actives (via l'API REST),
+// événements des dernières 24h, dernier brief stocké (anti-redite).
+async function collectBriefContext() {
+  const ctx = { kanban: "", activity: "", lastBrief: "" };
+  try {
+    const data = await kanbanApi(`/api/plugins/kanban/board?board=${encodeURIComponent(BOARD)}`);
+    const cards = (data?.columns || []).flatMap((c) => (c.tasks || []).map((t) => {
+      const status = String(t.status ?? "todo");
+      if (status === "done" || status === "archived") return null;
+      const prio = t.priority != null ? `[prio ${t.priority}]` : "";
+      const who = t.assignee ? ` → ${t.assignee}` : "";
+      return `${status}${prio} ${String(t.title ?? "untitled").slice(0, 160)}${who}`;
+    })).filter(Boolean);
+    ctx.kanban = cards.length ? cards.slice(0, 30).join("\n") : "Aucune carte active.";
+  } catch (e) {
+    ctx.kanban = `(kanban indisponible : ${String(e.message || e).split("\n")[0].slice(0, 120)})`;
+  }
+  try {
+    const { rows } = await q(
+      `SELECT kind, title, level, "createdAt" FROM "AgentEvent" WHERE "createdAt" > now() - interval '24 hours' ORDER BY "createdAt" DESC LIMIT 25`
+    );
+    ctx.activity = rows.length
+      ? rows.map((r) => `${new Date(r.createdAt).toISOString().slice(0, 16)} [${r.kind}/${r.level}] ${String(r.title || "").slice(0, 140)}`).join("\n")
+      : "Aucune activité dans les dernières 24h.";
+  } catch (e) { ctx.activity = "(activité indisponible)"; }
+  try {
+    const { rows } = await q(`SELECT data FROM "DataStore" WHERE key='hermes-briefing'`);
+    if (rows[0]?.data) {
+      const b = typeof rows[0].data === "string" ? JSON.parse(rows[0].data) : rows[0].data;
+      const parts = [b?.greeting, b?.summary, ...(b?.sections || []).map((s) => `${s.label}: ${(s.items || []).join(" ; ")}`)];
+      ctx.lastBrief = parts.filter(Boolean).join("\n").slice(0, 2000);
+    }
+  } catch { /* pas de brief précédent */ }
+  return ctx;
+}
 
 const DB_URL = process.env.DATABASE_URL || "";
 if (!DB_URL) { console.error("DATABASE_URL is required (use the direct postgres:// URL, not a prisma:// Accelerate URL)"); process.exit(1); }
@@ -362,14 +421,29 @@ async function gitCommitWiki(msg) {
 }
 
 /* ─────────────── Chief-of-staff daily brief ─────────────── */
+// Généré via l'API HTTP Hermes (hermesChat) : réponse propre, sans le cadre
+// `┌─ Reasoning ┐` que le CLI DeepSeek colle dans le stdout (c'était la cause du
+// brief cassé : parse JSON → échec → fallback = reasoning brut dans summary).
 async function generateBriefing() {
-  const raw = (await hermes(["chat", "-Q", "-q", BRIEF_PROMPT], { timeout: RUN_TIMEOUT_MS })).trim();
+  const ctx = await collectBriefContext().catch(() => ({ kanban: "", activity: "", lastBrief: "" }));
+  const prompt = buildBriefPrompt(ctx);
+  const raw = (await hermesChat(prompt, { timeout: RUN_TIMEOUT_MS })).trim();
   let brief;
   try {
-    const jsonStr = raw.replace(/^```(?:json)?/i, "").replace(/```$/, "").trim();
-    const m = jsonStr.match(/\{[\s\S]*\}/);
-    brief = JSON.parse(m ? m[0] : jsonStr);
-  } catch { brief = { summary: raw.slice(0, 1500), sections: [] }; }
+    // stripReasoning : retire un éventuel cadre `┌─ Reasoning … ┐` (fallback CLI)
+    let cleaned = raw;
+    const m = cleaned.match(/^┌─ Reasoning[\s\S]*?(?:┘|$)/);
+    if (m) cleaned = cleaned.slice(m[0].length).trim();
+    if (cleaned.startsWith("┌─")) cleaned = cleaned.split("\n").slice(1).join("\n").trim();
+    const jsonStr = cleaned.replace(/^```(?:json)?/i, "").replace(/```$/, "").trim();
+    const jm = jsonStr.match(/\{[\s\S]*\}/);
+    brief = JSON.parse(jm ? jm[0] : jsonStr);
+    if (!brief || typeof brief !== "object" || !brief.summary) throw new Error("shape");
+    brief.sections = Array.isArray(brief.sections) ? brief.sections : [];
+  } catch {
+    // Fallback PROPRE : jamais de reasoning brut dans summary — un message clair.
+    brief = { summary: "Le brief n'a pas pu être généré (réponse du modèle illisible). Regénère ou consulte le rapport matinal sur Telegram/Outline.", sections: [] };
+  }
   brief.generatedAt = new Date().toISOString();
   await setStore("hermes-briefing", brief);
   await emit("status", "Daily brief generated", { level: "up" });

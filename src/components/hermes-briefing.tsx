@@ -27,12 +27,12 @@ function timeAgo(d: string) {
   return "just now";
 }
 
-// tone a section by its intent
+// tone a section by its intent (labels FR du brief Le Blay + labels EN legacy)
 function sectionTone(label: string): string {
   const l = label.toLowerCase();
-  if (l.includes("decision") || l.includes("approv")) return "var(--warn)";
-  if (l.includes("ship") || l.includes("done") || l.includes("win")) return "var(--up)";
-  if (l.includes("next") || l.includes("priorit")) return "var(--accent)";
+  if (l.includes("décid") || l.includes("decision") || l.includes("approv") || l.includes("valid")) return "var(--warn)";
+  if (l.includes("livr") || l.includes("ship") || l.includes("done") || l.includes("win") || l.includes("termin")) return "var(--up)";
+  if (l.includes("priorit") || l.includes("prochain") || l.includes("next") || l.includes("à suivre")) return "var(--accent)";
   return "var(--text-3)";
 }
 
