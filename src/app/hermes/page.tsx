@@ -2,7 +2,6 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  Send,
   RefreshCw,
   Check,
   X,
@@ -135,118 +134,6 @@ function HealthChip({ health }: { health: Health | null }) {
         </span>
       )}
     </div>
-  );
-}
-
-// ── Dispatch bar ──────────────────────────────────────────
-// ── Dispatch bar (oneshot uniquement — le kanban vit sur /kanban) ──
-function DispatchBar({ onDone }: { onDone: () => void }) {
-  const [text, setText] = useState("");
-  const [body, setBody] = useState("");
-  const [side, setSide] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [toast, setToast] = useState<string | null>(null);
-  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const flash = (msg: string) => {
-    setToast(msg);
-    if (timer.current) clearTimeout(timer.current);
-    timer.current = setTimeout(() => setToast(null), 4000);
-  };
-  useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
-
-  const submit = async () => {
-    const title = text.trim();
-    if (!title || busy) return;
-    setBusy(true);
-    try {
-      const payload: Record<string, unknown> = {
-        kind: "oneshot",
-        title,
-        sideEffecting: side,
-      };
-      if (body.trim()) payload.prompt = body.trim();
-      const r = await fetch("/api/hermes/dispatch", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      if (r.ok) {
-        setText("");
-        setBody("");
-        flash(
-          side
-            ? "Sent to approval inbox — awaiting your go-ahead."
-            : "Queued for Hermes."
-        );
-        onDone();
-      } else {
-        flash("Dispatch failed. Try again.");
-      }
-    } catch {
-      flash("Dispatch failed. Try again.");
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <Panel className="p-5">
-      <div className="flex flex-col gap-3">
-        <input
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(); }
-          }}
-          placeholder="Ask or tell Hermes to do something…"
-          className="flex-1 min-w-0 bg-transparent text-[14px] text-[var(--text)] placeholder:text-[var(--text-3)] px-3.5 py-2.5 rounded-[10px] border border-[var(--line)] focus:border-[color-mix(in_srgb,var(--accent)_45%,transparent)] outline-none transition-colors"
-        />
-        <textarea
-          value={body}
-          onChange={(e) => setBody(e.target.value)}
-          rows={2}
-          placeholder="Instructions détaillées (optionnel)…"
-          className="w-full bg-transparent text-[13px] text-[var(--text-2)] placeholder:text-[var(--text-3)] px-3.5 py-2.5 rounded-[10px] border border-[var(--line)] focus:border-[color-mix(in_srgb,var(--accent)_45%,transparent)] outline-none resize-y"
-        />
-        <div className="flex items-center gap-3">
-          <button
-            type="button"
-            onClick={() => setSide((s) => !s)}
-            aria-pressed={side}
-            className="flex items-center gap-2 select-none"
-          >
-            <span
-              className="relative inline-flex h-[18px] w-[32px] rounded-full transition-colors"
-              style={{
-                background: side
-                  ? "color-mix(in srgb, var(--warn) 55%, transparent)"
-                  : "var(--surface-2)",
-                border: "1px solid var(--line)",
-              }}
-            >
-              <span
-                className="absolute top-[1px] h-[14px] w-[14px] rounded-full bg-[var(--text)] transition-all"
-                style={{ left: side ? "15px" : "1px" }}
-              />
-            </span>
-            <span className="text-[12px] font-medium text-[var(--text-2)]">
-              side-effecting?
-            </span>
-          </button>
-          <Button variant="primary" onClick={submit} disabled={busy || !text.trim()}>
-            <Send className="w-3.5 h-3.5" />
-            Dispatch
-          </Button>
-        </div>
-      </div>
-      {toast && (
-        <p className="mt-3 text-[12.5px] text-[var(--text-2)] flex items-center gap-1.5">
-          <Check className="w-3.5 h-3.5" style={{ color: "var(--up)" }} />
-          {toast}
-        </p>
-      )}
-    </Panel>
   );
 }
 
@@ -674,11 +561,6 @@ export default function HermesPage() {
               <RefreshCw className={`w-4 h-4 ${refreshing ? "animate-spin" : ""}`} />
             </button>
           </div>
-        </div>
-
-        {/* Dispatch */}
-        <div className="hq-rise">
-          <DispatchBar onDone={load} />
         </div>
 
         {/* Dispatches — what you've sent Hermes + live status/results */}
