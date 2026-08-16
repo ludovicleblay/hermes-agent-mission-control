@@ -7,7 +7,6 @@ import {
   Home,
   Bot,
   ClipboardList,
-  HeartPulse,
   Cpu,
   Brain,
   Menu,
@@ -21,12 +20,6 @@ const navGroups = [
       { href: "/", label: "Dashboard", icon: Home },
       { href: "/hermes", label: "Hermes", icon: Cpu },
       { href: "/tasks", label: "Tasks", icon: ClipboardList },
-    ],
-  },
-  {
-    name: "Data",
-    items: [
-      { href: "/client-pulse", label: "Client Pulse", icon: HeartPulse },
     ],
   },
   {
