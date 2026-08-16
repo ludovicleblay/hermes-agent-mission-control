@@ -60,6 +60,54 @@ async function hermes(args, { timeout = 30000 } = {}) {
   return stdout;
 }
 
+// Chat via l'API HTTP Hermes (API_SERVER :8642) — évite docker exec + SIGABRT
+// du CLI. Fallback sur le CLI si l'API n'est pas joignable.
+const HERMES_API_URL = process.env.HERMES_API_URL || "";
+let hermesApiKey = null;
+
+async function getApiKey() {
+  if (hermesApiKey) return hermesApiKey;
+  // API_SERVER_KEY vit dans /opt/data/.env du conteneur hermes
+  const { stdout } = await execFileP("docker", ["exec", "hermes", "sh", "-c", "grep API_SERVER_KEY /opt/data/.env | cut -d= -f2-"], { timeout: 10000 }).catch(() => ({ stdout: "" }));
+  hermesApiKey = stdout.trim();
+  return hermesApiKey;
+}
+
+async function hermesChat(prompt, { timeout = 90000 } = {}) {
+  // 1) Essayer l'API HTTP (propre, pas de SIGABRT)
+  if (HERMES_API_URL) {
+    try {
+      const key = await getApiKey();
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeout);
+      const res = await fetch(`${HERMES_API_URL}/v1/chat/completions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${key}`,
+        },
+        body: JSON.stringify({
+          model: "deepseek-v4-flash",
+          messages: [{ role: "user", content: prompt }],
+          max_tokens: 2000,
+        }),
+        signal: controller.signal,
+      });
+      clearTimeout(timer);
+      if (res.ok) {
+        const data = await res.json();
+        const content = data?.choices?.[0]?.message?.content || "";
+        if (content.trim()) return content.trim();
+      }
+      log("chat API non disponible, fallback CLI:", res.status);
+    } catch (e) {
+      log("chat API échec, fallback CLI:", e.message.split("\n")[0]);
+    }
+  }
+  // 2) Fallback : CLI (comportement d'origine)
+  return (await hermes(["chat", "-Q", "-q", prompt], { timeout })).trim();
+}
+
 async function emit(kind, title, { detail = null, agent = "hermes", level = "info", meta = null } = {}) {
   await q(
     `INSERT INTO "AgentEvent" (id, kind, title, detail, agent, level, meta, "createdAt")
@@ -242,9 +290,17 @@ async function runRequest(r) {
   try {
     let result = "";
     if (r.kind === "oneshot" || r.kind === "chat") {
-      result = (await hermes(["chat", "-Q", "-q", r.prompt || r.title], { timeout: RUN_TIMEOUT_MS })).trim();
+      result = await hermesChat(r.prompt || r.title, { timeout: RUN_TIMEOUT_MS });
     } else if (r.kind === "kanban") {
-      result = (await hermes(["kanban", "--board", BOARD, "create", "--json", r.title], { timeout: 20000 })).trim();
+      // prompt = JSON {body?, assignee?, priority?} encodé par la route /api/hermes/dispatch
+      let meta = {};
+      try { meta = r.prompt ? JSON.parse(r.prompt) : {}; } catch { meta = { body: r.prompt }; }
+      const args = ["kanban", "--board", BOARD, "create", "--json"];
+      if (meta.assignee) args.push("--assignee", String(meta.assignee));
+      if (meta.priority != null) args.push("--priority", String(meta.priority));
+      if (meta.body) args.push("--body", String(meta.body));
+      args.push(r.title);
+      result = (await hermes(args, { timeout: 20000 })).trim();
     } else if (r.kind.startsWith("cron.")) {
       const op = r.kind.split(".")[1];
       const a = JSON.parse(r.prompt || "{}");
@@ -290,6 +346,33 @@ async function processQueue() {
   for (const r of rows) await runRequest(r);
 }
 
+async function mirrorProfiles() {
+  try {
+    const out = await hermes(["profile", "list"], { timeout: 15000 });
+    // Parse la table texte : lignes de données = 5 colonnes séparées par ≥2 espaces
+    const profiles = [];
+    for (const line of out.split("\n")) {
+      if (!line.trim()) continue;
+      const parts = line.trim().split(/\s{2,}/);
+      if (parts.length < 3) continue;
+      if (/^─+$/.test(parts[0])) continue;
+      if (parts[0] === "Profile") continue;
+      const name = parts[0].replace(/^◆/, "").trim();
+      if (!name) continue;
+      profiles.push({
+        id: name,
+        name,
+        model: parts[1] || null,
+        gateway: (parts[2] || "unknown").toLowerCase(),
+        alias: parts[3] && parts[3] !== "—" ? parts[3] : null,
+        distribution: parts[4] && parts[4] !== "—" ? parts[4] : null,
+        isCurrent: parts[0].startsWith("◆"),
+      });
+    }
+    await setStore("hermes-profiles", { profiles, syncedAt: new Date().toISOString() });
+  } catch (e) { log("profile list failed:", e.message.split("\n")[0]); }
+}
+
 /* ─────────────── loops ─────────────── */
 async function mirrorTick() {
   try { await mirrorKanban(); } catch (e) { log("mirrorKanban err", e.message); }
@@ -297,6 +380,7 @@ async function mirrorTick() {
   try { await mirrorHealth(); } catch (e) { log("mirrorHealth err", e.message); }
   try { await mirrorWiki(); } catch (e) { log("mirrorWiki err", e.message); }
   try { await mirrorCost(); } catch (e) { log("mirrorCost err", e.message); }
+  try { await mirrorProfiles(); } catch (e) { log("mirrorProfiles err", e.message); }
   try { await maybeDailyBrief(); } catch (e) { log("maybeDailyBrief err", e.message); }
 }
 
