@@ -8,6 +8,11 @@ import {
   LayoutGrid,
   ShieldAlert,
   Send,
+  Paperclip,
+  MessageSquare,
+  UserCog,
+  Flag,
+  CircleCheck,
 } from "lucide-react";
 import {
   Panel,
@@ -33,17 +38,34 @@ type Task = {
   syncedAt: string;
 };
 
+type DetailJSON = {
+  task?: Record<string, unknown>;
+  latest_summary?: string | null;
+  comments?: { author: string; body: string; created_at: number }[];
+  events?: { kind: string; payload: Record<string, unknown> | null; created_at: number; run_id: number | null }[];
+  attachments?: { id: number; filename: string; size: number; uploaded_by: string; created_at: number }[];
+  runs?: {
+    id: number; profile: string; status: string; outcome: string;
+    worker_pid: number | null; started_at: number | null; ended_at: number | null;
+    summary: string | null; error: string | null;
+  }[];
+  child_results?: { id: string; title: string; status: string; latest_summary: string | null }[];
+};
+
 const COLUMN_LABEL: Record<string, string> = {
+  triage: "Triage",
+  todo: "To do",
   ready: "Ready",
   running: "Running",
+  review: "Review",
   blocked: "Blocked",
   done: "Done",
 };
-const COLUMN_ORDER = ["ready", "running", "blocked", "done"];
+const COLUMN_ORDER = ["triage", "todo", "ready", "running", "review", "blocked", "done"];
 const columnFor = (s: string) =>
-  COLUMN_LABEL[s] ? s : ["running", "blocked"].includes(s) ? s : s === "done" ? "done" : "ready";
+  COLUMN_LABEL[s] ? s : ["running", "blocked", "review"].includes(s) ? s : s === "done" ? "done" : "ready";
 const columnTone = (c: string) =>
-  c === "running" ? "accent" : c === "blocked" ? "warn" : c === "done" ? "up" : "neutral";
+  c === "running" ? "accent" : c === "blocked" ? "warn" : c === "done" ? "up" : c === "review" ? "warn" : "neutral";
 
 function timeAgo(iso: string | null): string {
   if (!iso) return "—";
@@ -51,6 +73,29 @@ function timeAgo(iso: string | null): string {
   if (s < 60) return `${Math.round(s)}s`;
   if (s < 3600) return `${Math.round(s / 60)}m`;
   return `${Math.round(s / 3600)}h`;
+}
+
+function epochAgo(ts: number | null | undefined): string {
+  if (!ts) return "—";
+  const s = Math.max(0, (Date.now() - ts * 1000) / 1000);
+  if (s < 60) return `${Math.round(s)}s`;
+  if (s < 3600) return `${Math.round(s / 60)}m`;
+  return `${Math.round(s / 3600)}h`;
+}
+
+function fmtDur(start: number | null, end: number | null): string {
+  if (!start) return "—";
+  const e = end || Math.floor(Date.now() / 1000);
+  const s = Math.max(0, e - start);
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.round(s / 60)}m${s % 60}s`;
+  return `${Math.round(s / 3600)}h${Math.round((s % 3600) / 60)}m`;
+}
+
+function fmtSize(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} Ko`;
+  return `${(n / 1024 / 1024).toFixed(1)} Mo`;
 }
 
 async function getJSON<T>(url: string): Promise<T | null> {
@@ -63,35 +108,53 @@ async function getJSON<T>(url: string): Promise<T | null> {
   }
 }
 
+function parseDetail(detail: string | null): DetailJSON {
+  if (!detail) return {};
+  try {
+    const d = JSON.parse(detail);
+    return typeof d === "object" && d !== null ? (d as DetailJSON) : {};
+  } catch {
+    return {};
+  }
+}
+
+function runTone(r: { status: string; outcome: string; error: string | null }): { label: string; tone: "up" | "down" | "warn" | "neutral" | "accent" } {
+  if (r.outcome === "completed" || r.status === "done") return { label: "completed", tone: "up" };
+  if (r.outcome === "crashed" || r.outcome === "failed" || r.error || r.outcome === "errored") return { label: r.error ? "failed" : r.outcome, tone: "down" };
+  if (r.outcome === "reclaimed" || r.outcome === "terminated" || r.outcome === "killed") return { label: r.outcome, tone: "warn" };
+  if (r.status === "running" || r.outcome === "running") return { label: "running", tone: "accent" };
+  return { label: r.outcome || r.status, tone: "neutral" };
+}
+
 // ── Détail d'une carte ────────────────────────────────────
 function TaskDetail({ task, onClose, onValidated }: { task: Task; onClose: () => void; onValidated: () => void }) {
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<string | null>(null);
   const [direction, setDirection] = useState("");
+  const [comment, setComment] = useState("");
+  const [newAssignee, setNewAssignee] = useState(task.assignee || "jarvis");
+  const detail = parseDetail(task.detail);
+  const comments = detail.comments || [];
+  const runs = detail.runs || [];
+  const events = detail.events || [];
+  const attachments = detail.attachments || [];
+  const children = detail.child_results || [];
+  const latestSummary = detail.latest_summary || task.result;
 
-  const unblock = async () => {
+  const dispatch = async (kind: string, prompt: Record<string, unknown>, okMsg: string) => {
     setBusy(true);
     setNote(null);
-    const dir = direction.trim();
     try {
       const r = await fetch("/api/hermes/dispatch", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          kind: "kanban.unblock",
-          title: `kanban unblock ${task.id}`,
-          prompt: JSON.stringify({
-            task_id: task.id,
-            reason: dir ? `Validée manuellement — ${dir}` : "Validée manuellement depuis Hermy",
-            direction: dir || undefined,
-          }),
-        }),
+        body: JSON.stringify({ kind, title: `${kind} ${task.id}`, prompt: JSON.stringify(prompt) }),
       });
       if (r.ok) {
-        setNote("✅ Validation envoyée — le worker va reprendre dans ~1 min.");
-        setTimeout(onValidated, 2500);
+        setNote(`✅ ${okMsg} — synchronisation dans ~1 min.`);
+        setTimeout(onValidated, 2000);
       } else {
-        setNote("⚠️ Échec de l'envoi de la validation.");
+        setNote("⚠️ Échec de l'envoi.");
       }
     } catch {
       setNote("⚠️ Erreur réseau.");
@@ -100,32 +163,43 @@ function TaskDetail({ task, onClose, onValidated }: { task: Task; onClose: () =>
     }
   };
 
-  // extrait les comments du détail (sortie `hermes kanban show`)
-  // Section "Comments (N):" → chaque entrée démarre par une ligne "  [date] author:"
-  const comments = (() => {
-    if (!task.detail) return [];
-    const section = task.detail.split(/\nComments \(\d+\):\n/)[1];
-    if (!section) return [];
-    return section
-      .split(/^\s*\[/m)
-      .filter(Boolean)
-      .map((block) => {
-        const m = block.match(/^(.*?)\]\s+(\w+):\s*([\s\S]*)$/);
-        if (!m) return null;
-        return { when: m[1], who: m[2], text: m[3].trim() };
-      })
-      .filter((c): c is { when: string; who: string; text: string } => c !== null);
-  })();
+  const unblock = () =>
+    dispatch(
+      "kanban.unblock",
+      { task_id: task.id, reason: direction.trim() ? `Validée manuellement — ${direction.trim()}` : "Validée manuellement depuis Hermy", direction: direction.trim() || undefined },
+      "Validation envoyée — le worker va reprendre dans ~1 min."
+    );
+
+  const addComment = () => {
+    if (!comment.trim()) return;
+    dispatch("kanban.comment", { task_id: task.id, body: comment.trim(), author: "Ludo" }, "Commentaire envoyé.").then(() => setComment(""));
+  };
+
+  const reassign = () => {
+    if (!newAssignee) return;
+    dispatch("kanban.reassign", { task_id: task.id, profile: newAssignee }, `Réassignation à ${newAssignee} envoyée.`);
+  };
+
+  const complete = () =>
+    dispatch("kanban.complete", { task_id: task.id, summary: latestSummary || undefined }, "Carte marquée done.");
+
+  const block = () =>
+    dispatch("kanban.block", { task_id: task.id, reason: direction.trim() || "Blocage manuel depuis Hermy" }, "Carte bloquée.");
+
+  const isBlocked = task.status === "blocked";
+  const isDone = task.status === "done";
+  const isRunning = task.status === "running";
 
   return (
     <Panel className="p-5">
       <div className="flex items-start justify-between gap-3 mb-3">
         <div className="flex items-center gap-2 flex-wrap">
-          <Pill tone={task.status === "blocked" ? "warn" : "neutral"}>{task.status}</Pill>
+          <Pill tone={task.status === "blocked" ? "warn" : task.status === "running" ? "accent" : task.status === "done" ? "up" : "neutral"}>{task.status}</Pill>
           {task.assignee && <Pill tone="neutral">{task.assignee}</Pill>}
-          {task.priority != null && task.priority > 0 && (
-            <Pill tone="neutral">P{task.priority}</Pill>
-          )}
+          {task.priority != null && task.priority > 0 && <Pill tone="neutral">P{task.priority}</Pill>}
+          {runs.length > 0 && <Pill tone="neutral">{runs.length} run{runs.length > 1 ? "s" : ""}</Pill>}
+          {attachments.length > 0 && <Pill tone="neutral">{attachments.length} 📎</Pill>}
+          {children.length > 0 && <Pill tone="neutral">{children.length} enfants</Pill>}
         </div>
         <button type="button" onClick={onClose} aria-label="Close" className="btn-ghost w-8 h-8 inline-flex items-center justify-center">
           <X className="w-4 h-4" />
@@ -142,6 +216,78 @@ function TaskDetail({ task, onClose, onValidated }: { task: Task; onClose: () =>
         </div>
       )}
 
+      {/* Résumé du worker */}
+      {latestSummary && (
+        <div className="mt-4">
+          <Eyebrow>Résumé</Eyebrow>
+          <p className="mt-1.5 text-[13px] text-[var(--text-2)] leading-snug whitespace-pre-wrap">{latestSummary}</p>
+        </div>
+      )}
+
+      {/* Runs — historique d'exécution (crash détectable ici) */}
+      {runs.length > 0 && (
+        <div className="mt-4">
+          <Eyebrow>Runs ({runs.length})</Eyebrow>
+          <div className="mt-2 space-y-2">
+            {runs.map((r) => {
+              const t = runTone(r);
+              return (
+                <div key={r.id} className="rounded-[10px] border border-[var(--line)] p-3">
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                    <div className="flex items-center gap-2">
+                      <span
+                        className="w-2 h-2 rounded-full shrink-0"
+                        style={{ background: t.tone === "down" ? "var(--down)" : t.tone === "warn" ? "var(--warn)" : t.tone === "up" ? "var(--up)" : t.tone === "accent" ? "var(--accent)" : "var(--text-3)" }}
+                      />
+                      <span className="num text-[11px] font-semibold text-[var(--text-2)]">#{r.id} · {r.profile}</span>
+                      <span className="num text-[10.5px] text-[var(--text-3)]">pid {r.worker_pid || "—"}</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="num text-[10.5px]" style={{ color: t.tone === "down" ? "var(--down)" : t.tone === "warn" ? "var(--warn)" : t.tone === "up" ? "var(--up)" : "var(--text-2)" }}>
+                        {t.label}
+                      </span>
+                      <span className="num text-[10.5px] text-[var(--text-3)]">{fmtDur(r.started_at, r.ended_at)}</span>
+                      <span className="num text-[10px] text-[var(--text-3)]">il y a {epochAgo(r.ended_at || r.started_at)}</span>
+                    </div>
+                  </div>
+                  {r.error && (
+                    <p className="mt-2 text-[12px] text-[var(--down)] leading-snug whitespace-pre-wrap break-words">❌ {r.error}</p>
+                  )}
+                  {r.summary && !r.error && (
+                    <p className="mt-2 text-[12px] text-[var(--text-2)] leading-snug whitespace-pre-wrap line-clamp-4">{r.summary}</p>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Pièces jointes */}
+      {attachments.length > 0 && (
+        <div className="mt-4">
+          <Eyebrow>Pièces jointes ({attachments.length})</Eyebrow>
+          <div className="mt-2 space-y-1.5">
+            {attachments.map((a) => (
+              <div key={a.id} className="flex items-center gap-2 rounded-[8px] border border-[var(--line)] px-3 py-2">
+                <Paperclip className="w-3.5 h-3.5 shrink-0 text-[var(--text-3)]" />
+                <a
+                  href={`/api/hermes/kanban-attachment/${a.id}?board=${encodeURIComponent(task.board || "default")}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-[12.5px] text-[var(--accent)] hover:underline truncate flex-1"
+                >
+                  {a.filename}
+                </a>
+                <span className="num text-[10.5px] text-[var(--text-3)] shrink-0">{fmtSize(a.size)}</span>
+                <span className="num text-[10px] text-[var(--text-3)] shrink-0">par {a.uploaded_by}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Commentaires */}
       {comments.length > 0 && (
         <div className="mt-4">
           <Eyebrow>Comments ({comments.length})</Eyebrow>
@@ -149,54 +295,153 @@ function TaskDetail({ task, onClose, onValidated }: { task: Task; onClose: () =>
             {comments.map((c, i) => (
               <div key={i} className="rounded-[10px] border border-[var(--line)] p-3">
                 <div className="flex items-center justify-between gap-2">
-                  <span className="num text-[10.5px] font-semibold text-[var(--text-2)]">{c.who}</span>
-                  <span className="num text-[10px] text-[var(--text-3)]">{c.when}</span>
+                  <span className="num text-[10.5px] font-semibold text-[var(--text-2)]">{c.author}</span>
+                  <span className="num text-[10px] text-[var(--text-3)]">il y a {epochAgo(c.created_at)}</span>
                 </div>
-                <p className="mt-1 text-[12.5px] text-[var(--text-2)] leading-snug whitespace-pre-wrap">{c.text}</p>
+                <p className="mt-1 text-[12.5px] text-[var(--text-2)] leading-snug whitespace-pre-wrap">{c.body}</p>
               </div>
             ))}
           </div>
         </div>
       )}
 
-      {task.result && (
+      {/* Événements récents (condensés) */}
+      {events.length > 0 && (
         <div className="mt-4">
-          <Eyebrow>Résultat</Eyebrow>
-          <p className="mt-1.5 text-[12.5px] text-[var(--text-2)] leading-snug whitespace-pre-wrap">{task.result}</p>
-        </div>
-      )}
-
-      {note && <p className="mt-3 text-[12.5px] text-[var(--text-2)]">{note}</p>}
-
-      {task.status === "blocked" && (
-        <div className="mt-5">
-          <Eyebrow>Décision</Eyebrow>
-          <textarea
-            value={direction}
-            onChange={(e) => setDirection(e.target.value)}
-            rows={2}
-            placeholder="Consigne pour l'agent (ex : méthode B, ou précision sur ce que tu veux)… optionnel"
-            className="w-full mt-2 bg-transparent text-[13px] text-[var(--text-2)] placeholder:text-[var(--text-3)] px-3.5 py-2.5 rounded-[10px] border border-[var(--line)] focus:border-[color-mix(in_srgb,var(--accent)_45%,transparent)] outline-none resize-y"
-          />
-          <div className="mt-3 flex items-center gap-2">
-            <button
-              type="button"
-              onClick={unblock}
-              disabled={busy}
-              className="inline-flex items-center gap-1.5 rounded-full px-4 py-2 text-[12.5px] font-semibold transition-colors"
-              style={{
-                color: "var(--up)",
-                border: "1px solid color-mix(in srgb, var(--up) 35%, transparent)",
-                background: "color-mix(in srgb, var(--up) 10%, transparent)",
-                opacity: busy ? 0.5 : 1,
-              }}
-            >
-              <Check className="w-3.5 h-3.5" />
-              {busy ? "Validation…" : direction.trim() ? "Valider avec cette consigne" : "✅ Valider (débloquer)"}
-            </button>
+          <Eyebrow>Événements ({events.length})</Eyebrow>
+          <div className="mt-2 flex flex-col gap-1 max-h-[180px] overflow-auto">
+            {events.slice(-25).map((e, i) => (
+              <div key={i} className="flex items-center gap-2 text-[11.5px]">
+                <span className="num text-[10px] text-[var(--text-3)] shrink-0">{epochAgo(e.created_at)}</span>
+                <span className="num text-[10.5px] text-[var(--text-2)] shrink-0">{e.kind}</span>
+                <span className="text-[11px] text-[var(--text-3)] truncate">
+                  {e.payload
+                    ? Object.entries(e.payload).map(([k, v]) => `${k}=${typeof v === "object" ? JSON.stringify(v) : v}`).join(" ")
+                    : ""}
+                </span>
+              </div>
+            ))}
           </div>
         </div>
       )}
+
+      {/* Enfants */}
+      {children.length > 0 && (
+        <div className="mt-4">
+          <Eyebrow>Enfants ({children.length})</Eyebrow>
+          <div className="mt-2 space-y-1.5">
+            {children.map((c) => (
+              <div key={c.id} className="flex items-center gap-2 rounded-[8px] border border-[var(--line)] px-3 py-2">
+                <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: c.status === "done" ? "var(--up)" : c.status === "running" ? "var(--accent)" : c.status === "blocked" ? "var(--warn)" : "var(--text-3)" }} />
+                <span className="num text-[10.5px] text-[var(--text-3)] shrink-0">{c.id}</span>
+                <span className="text-[12px] text-[var(--text-2)] truncate flex-1">{c.title}</span>
+                <span className="num text-[10.5px] text-[var(--text-3)] shrink-0">{c.status}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Actions */}
+      <div className="mt-5 pt-4 border-t border-[var(--line)]">
+        <div className="flex flex-col gap-3">
+          {/* Commenter */}
+          <div className="flex gap-2">
+            <input
+              value={comment}
+              onChange={(e) => setComment(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); addComment(); } }}
+              placeholder="Laisser un commentaire… (auteur : Ludo)"
+              className="flex-1 min-w-0 bg-transparent text-[13px] text-[var(--text-2)] placeholder:text-[var(--text-3)] px-3.5 py-2 rounded-[10px] border border-[var(--line)] focus:border-[color-mix(in_srgb,var(--accent)_45%,transparent)] outline-none"
+            />
+            <button
+              type="button"
+              onClick={addComment}
+              disabled={busy || !comment.trim()}
+              className="inline-flex items-center gap-1.5 rounded-full px-3.5 py-2 text-[12px] font-semibold transition-colors"
+              style={{ color: "var(--text-2)", border: "1px solid var(--line)", opacity: busy || !comment.trim() ? 0.5 : 1 }}
+            >
+              <MessageSquare className="w-3.5 h-3.5" /> Commenter
+            </button>
+          </div>
+
+          {/* Réassigner */}
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-[12px] text-[var(--text-3)] flex items-center gap-1"><UserCog className="w-3.5 h-3.5" /> Assigné :</span>
+            <select
+              value={newAssignee}
+              onChange={(e) => setNewAssignee(e.target.value)}
+              className="bg-transparent text-[12px] text-[var(--text-2)] px-2.5 py-1.5 rounded-[8px] border border-[var(--line)] outline-none"
+            >
+              <option value="jarvis">jarvis 🧠</option>
+              <option value="toad">toad 🍄</option>
+              <option value="">non assignée</option>
+            </select>
+            <button
+              type="button"
+              onClick={reassign}
+              disabled={busy}
+              className="inline-flex items-center gap-1 rounded-full px-3 py-1.5 text-[11.5px] font-semibold transition-colors"
+              style={{ color: "var(--text-2)", border: "1px solid var(--line)", opacity: busy ? 0.5 : 1 }}
+            >
+              Réassigner
+            </button>
+            {!isDone && !isRunning && (
+              <button
+                type="button"
+                onClick={complete}
+                disabled={busy}
+                className="inline-flex items-center gap-1 rounded-full px-3 py-1.5 text-[11.5px] font-semibold transition-colors ml-auto"
+                style={{ color: "var(--up)", border: "1px solid color-mix(in srgb, var(--up) 35%, transparent)", opacity: busy ? 0.5 : 1 }}
+              >
+                <CircleCheck className="w-3.5 h-3.5" /> Marquer done
+              </button>
+            )}
+            {!isDone && !isBlocked && !isRunning && (
+              <button
+                type="button"
+                onClick={block}
+                disabled={busy}
+                className="inline-flex items-center gap-1 rounded-full px-3 py-1.5 text-[11.5px] font-semibold transition-colors"
+                style={{ color: "var(--warn)", border: "1px solid color-mix(in srgb, var(--warn) 35%, transparent)", opacity: busy ? 0.5 : 1 }}
+              >
+                <Flag className="w-3.5 h-3.5" /> Bloquer
+              </button>
+            )}
+          </div>
+
+          {/* Zone validation (carte bloquée) */}
+          {isBlocked && (
+            <div className="rounded-[10px] border border-[color-mix(in_srgb,var(--warn)_30%,transparent)] bg-[color-mix(in_srgb,var(--warn)_6%,transparent)] p-3">
+              <Eyebrow>Décision requise</Eyebrow>
+              <textarea
+                value={direction}
+                onChange={(e) => setDirection(e.target.value)}
+                rows={2}
+                placeholder="Consigne pour l'agent (ex : méthode B, ou précision sur ce que tu veux)… optionnel"
+                className="w-full mt-2 bg-transparent text-[13px] text-[var(--text-2)] placeholder:text-[var(--text-3)] px-3.5 py-2.5 rounded-[10px] border border-[var(--line)] focus:border-[color-mix(in_srgb,var(--accent)_45%,transparent)] outline-none resize-y"
+              />
+              <button
+                type="button"
+                onClick={unblock}
+                disabled={busy}
+                className="mt-3 inline-flex items-center gap-1.5 rounded-full px-4 py-2 text-[12.5px] font-semibold transition-colors"
+                style={{
+                  color: "var(--up)",
+                  border: "1px solid color-mix(in srgb, var(--up) 35%, transparent)",
+                  background: "color-mix(in srgb, var(--up) 10%, transparent)",
+                  opacity: busy ? 0.5 : 1,
+                }}
+              >
+                <Check className="w-3.5 h-3.5" />
+                {busy ? "Validation…" : direction.trim() ? "Valider avec cette consigne" : "✅ Valider (débloquer)"}
+              </button>
+            </div>
+          )}
+
+          {note && <p className="text-[12.5px] text-[var(--text-2)]">{note}</p>}
+        </div>
+      </div>
     </Panel>
   );
 }
@@ -238,7 +483,7 @@ function CreateCard({ onDone }: { onDone: () => void }) {
       if (r.ok) {
         setTitle("");
         setBody("");
-        flash(`Carte créée — le dispatcher va la prendre (assignee: ${assignee || "triage"}).`);
+        flash(`Carte créée — le dispatcher va la prendre (assignee: ${assignee || "jarvis"}).`);
         setTimeout(onDone, 2500);
       } else {
         flash("Échec de la création. Réessaie.");
@@ -450,7 +695,7 @@ export default function KanbanPage() {
             <TaskDetail task={selected} onClose={() => setSelectedId(null)} onValidated={load} />
           ) : (
             <Panel className="p-5 text-[13px] text-[var(--text-3)]">
-              Clique sur une carte pour lire les instructions, les commentaires et la raison du blocage avant de valider.
+              Clique sur une carte pour lire les instructions, le résumé, les runs (crashs inclus), les pièces jointes et les commentaires — et pour agir (commenter, réassigner, valider, bloquer).
             </Panel>
           )}
         </div>

@@ -108,6 +108,65 @@ async function hermesChat(prompt, { timeout = 90000 } = {}) {
   return (await hermes(["chat", "-Q", "-q", prompt], { timeout })).trim();
 }
 
+/* ─────────────── Kanban API REST (dashboard Hermes :9119) ───────────────
+ * L'API REST du plugin kanban (même code que le CLI, zero-patch) — session
+ * login password (provider basic) → cookies → appels HTTP. Fallback CLI si
+ * l'API est injoignable (dashboard down). */
+const KANBAN_API = process.env.HERMES_KANBAN_API_URL || "http://hermes:9119";
+const KANBAN_USER = process.env.HERMES_KANBAN_API_USER || "admin";
+const KANBAN_PASS = process.env.HERMES_KANBAN_API_PASSWORD || "";
+let kanbanCookie = "";
+let kanbanCookieAt = 0;
+
+async function kanbanLogin() {
+  const res = await fetch(`${KANBAN_API}/auth/password-login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ provider: "basic", username: KANBAN_USER, password: KANBAN_PASS }),
+  });
+  if (!res.ok) throw new Error(`kanban login failed: ${res.status}`);
+  const setCookies = (res.headers.getSetCookie?.() || []).map((c) => c.split(";")[0]).join("; ");
+  if (!setCookies) throw new Error("kanban login: no session cookie");
+  kanbanCookie = setCookies;
+  kanbanCookieAt = Date.now();
+  return setCookies;
+}
+
+async function kanbanApi(path, { method = "GET", body = null } = {}) {
+  // Cookie de session absent ou vieux (>10 min) → re-login (TTL session ~12h)
+  if (!kanbanCookie || Date.now() - kanbanCookieAt > 10 * 60 * 1000) {
+    await kanbanLogin().catch((e) => { throw new Error(`kanban re-login failed: ${e.message}`); });
+  }
+  let res;
+  try {
+    res = await fetch(`${KANBAN_API}${path}`, {
+      method,
+      headers: {
+        Cookie: kanbanCookie,
+        ...(body ? { "Content-Type": "application/json" } : {}),
+      },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+  } catch (e) {
+    throw new Error(`kanban API ${path} unreachable: ${e.message.split("\n")[0]}`);
+  }
+  if (res.status === 401) {
+    // Session expirée côté serveur → re-login une fois puis retry
+    await kanbanLogin();
+    res = await fetch(`${KANBAN_API}${path}`, {
+      method,
+      headers: { Cookie: kanbanCookie, ...(body ? { "Content-Type": "application/json" } : {}) },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+  }
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`kanban API ${path} → ${res.status}: ${txt.slice(0, 200)}`);
+  }
+  const ct = res.headers.get("content-type") || "";
+  return ct.includes("application/json") ? res.json() : res.text();
+}
+
 async function emit(kind, title, { detail = null, agent = "hermes", level = "info", meta = null } = {}) {
   await q(
     `INSERT INTO "AgentEvent" (id, kind, title, detail, agent, level, meta, "createdAt")
@@ -125,20 +184,34 @@ async function setStore(key, data) {
 }
 
 /* ─────────────── PULL: mirror Hermes → Postgres ─────────────── */
+let lastDetailAt = {}; // id -> ts du dernier détail récupéré
+let lastStatus = {};   // id -> statut au dernier détail
+
 async function mirrorKanban() {
   let tasks = [];
+  let apiMode = true;
   try {
-    // NB: this Hermes CLI wants --board BEFORE the subcommand.
-    const out = await hermes(["kanban", "--board", BOARD, "list", "--json"], { timeout: 15000 });
-    const parsed = JSON.parse(out || "[]");
-    tasks = Array.isArray(parsed) ? parsed : parsed.tasks || [];
-  } catch (e) { log("kanban list failed:", e.message.split("\n")[0]); return; }
+    // L'API board renvoie {columns:[{name, tasks:[...]}]} — on aplatit.
+    const data = await kanbanApi(`/api/plugins/kanban/board?board=${encodeURIComponent(BOARD)}`);
+    tasks = (data?.columns || []).flatMap((c) => c.tasks || []);
+  } catch (e) {
+    apiMode = false;
+    log("kanban board API failed, fallback CLI:", e.message.split("\n")[0]);
+    try {
+      // NB: this Hermes CLI wants --board BEFORE the subcommand.
+      const out = await hermes(["kanban", "--board", BOARD, "list", "--json"], { timeout: 15000 });
+      const parsed = JSON.parse(out || "[]");
+      tasks = Array.isArray(parsed) ? parsed : parsed.tasks || [];
+    } catch (e2) { log("kanban list failed:", e2.message.split("\n")[0]); return; }
+  }
 
   const seen = new Set();
   for (const t of tasks) {
     const id = String(t.id ?? t.task_id ?? "");
     if (!id) continue;
     seen.add(id);
+    const status = String(t.status ?? "todo");
+    const result = t.result ?? t.latest_summary ?? null;
     await q(
       `INSERT INTO "HermesTask" (id, board, title, body, assignee, status, priority, result, "updatedAt", "syncedAt")
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8, now(), now())
@@ -146,9 +219,34 @@ async function mirrorKanban() {
          title=EXCLUDED.title, body=EXCLUDED.body, assignee=EXCLUDED.assignee, status=EXCLUDED.status,
          priority=EXCLUDED.priority, result=EXCLUDED.result, "syncedAt"=now()`,
       [id, BOARD, String(t.title ?? "untitled").slice(0, 300), t.body ? String(t.body).slice(0, 4000) : null,
-       t.assignee ?? null, String(t.status ?? "todo"), t.priority != null ? Number(t.priority) : null,
-       t.result ? String(t.result).slice(0, 2000) : null]
+       t.assignee ?? null, status, t.priority != null ? Number(t.priority) : null,
+       result ? String(result).slice(0, 2000) : null]
     );
+
+    // ── Détail complet (comments + runs + events + attachments) pour TOUTES les cartes ──
+    // Refetch si : jamais fetché, statut changé, ou carte active (non-done) il y a > 60 s.
+    // Les cartes done ne sont fetchées qu'une fois (elles ne bougent plus).
+    const now = Date.now();
+    const statusChanged = lastStatus[id] !== undefined && lastStatus[id] !== status;
+    const isActive = status !== "done" && status !== "archived";
+    const needDetail = !lastDetailAt[id] || statusChanged || (isActive && now - lastDetailAt[id] > 60_000);
+    if (needDetail) {
+      try {
+        let detailJson;
+        if (apiMode) {
+          const d = await kanbanApi(`/api/plugins/kanban/tasks/${encodeURIComponent(id)}?board=${encodeURIComponent(BOARD)}`);
+          detailJson = JSON.stringify(d);
+        } else {
+          const out = await hermes(["kanban", "--board", BOARD, "show", "--json", id], { timeout: 15000 });
+          detailJson = out.trim();
+        }
+        await q(`UPDATE "HermesTask" SET detail=$1, "syncedAt"=now() WHERE id=$2`, [String(detailJson).slice(0, 30000), id]);
+        lastDetailAt[id] = now;
+        lastStatus[id] = status;
+      } catch (e) { log("kanban detail failed:", String(e.message || e).split("\n")[0]); }
+    } else {
+      lastStatus[id] = status;
+    }
   }
   // prune tasks that vanished from the board
   if (seen.size) {
@@ -156,18 +254,8 @@ async function mirrorKanban() {
   } else {
     await q(`DELETE FROM "HermesTask" WHERE board=$1`, [BOARD]);
   }
-
-  // ── Détails des cartes bloquées (comments + raison de blocage) ──
-  // Un show par carte bloquée (peu nombreuses) — stocké en JSON pour l'UI de validation.
-  const blocked = tasks.filter((t) => String(t.status ?? "") === "blocked");
-  for (const t of blocked) {
-    const id = String(t.id ?? t.task_id ?? "");
-    if (!id) continue;
-    try {
-      const out = await hermes(["kanban", "--board", BOARD, "show", id], { timeout: 15000 });
-      await q(`UPDATE "HermesTask" SET detail=$1, "syncedAt"=now() WHERE id=$2`, [String(out).slice(0, 30000), id]);
-    } catch (e) { log("kanban show failed:", String(e.message || e).split("\n")[0]); }
-  }
+  // nettoyage cache mémoire des cartes disparues
+  for (const k of Object.keys(lastDetailAt)) if (!seen.has(k)) { delete lastDetailAt[k]; delete lastStatus[k]; }
 }
 
 async function mirrorCrons() {
@@ -307,17 +395,19 @@ async function runRequest(r) {
       // prompt = JSON {body?, assignee?, priority?} encodé par la route /api/hermes/dispatch
       let meta = {};
       try { meta = r.prompt ? JSON.parse(r.prompt) : {}; } catch { meta = { body: r.prompt }; }
-      const args = ["kanban", "--board", BOARD, "create", "--json"];
       // Assignee par défaut : jarvis (le profil worker qui a le skill kanban-risk-validation).
       // "" (triage) ou absent → jarvis, sinon le profil demandé (ex. toad).
       const worker = String(meta.assignee ?? "").trim() || "jarvis";
-      if (worker) args.push("--assignee", worker);
-      if (meta.priority != null) args.push("--priority", String(meta.priority));
-      if (meta.body) args.push("--body", String(meta.body));
-      // Consigne systémique de validation des tâches risquées — épinglée à chaque carte
-      args.push("--skill", "kanban-risk-validation");
-      args.push(r.title);
-      result = (await hermes(args, { timeout: 20000 })).trim();
+      const payload = {
+        title: r.title,
+        body: meta.body ? String(meta.body) : undefined,
+        assignee: worker,
+        priority: meta.priority != null ? Number(meta.priority) : 0,
+        // Consigne systémique de validation des tâches risquées — épinglée à chaque carte
+        skills: ["kanban-risk-validation"],
+      };
+      const d = await kanbanApi(`/api/plugins/kanban/tasks?board=${encodeURIComponent(BOARD)}`, { method: "POST", body: payload });
+      result = JSON.stringify(d);
     } else if (r.kind === "kanban.unblock") {
       // Validation humaine : débloque une carte bloquée (needs_input) — prompt = JSON {task_id, reason?, direction?}
       let meta = {};
@@ -326,25 +416,60 @@ async function runRequest(r) {
       // Consigne libre de l'humain → postée comme commentaire sur la carte avant déblocage
       if (meta.direction && String(meta.direction).trim()) {
         const dir = String(meta.direction).trim().slice(0, 4000);
-        await hermes(["kanban", "--board", BOARD, "comment", String(meta.task_id), "--author", "Ludo", dir], { timeout: 15000 }).catch((e) => log("kanban comment (direction) failed:", String(e.message || e).split("\n")[0]));
+        await kanbanApi(`/api/plugins/kanban/tasks/${encodeURIComponent(meta.task_id)}/comments?board=${encodeURIComponent(BOARD)}`, {
+          method: "POST", body: { body: dir, author: "Ludo" },
+        }).catch((e) => log("kanban comment (direction) failed:", String(e.message || e).split("\n")[0]));
       }
-      const args = ["kanban", "--board", BOARD, "unblock", String(meta.task_id)];
-      if (meta.reason) args.push("--reason", String(meta.reason));
-      result = (await hermes(args, { timeout: 20000 })).trim();
+      // unblock → status ready (le dispatcher relance un worker)
+      const d = await kanbanApi(`/api/plugins/kanban/tasks/${encodeURIComponent(meta.task_id)}?board=${encodeURIComponent(BOARD)}`, {
+        method: "PATCH", body: { status: "ready" },
+      });
+      result = JSON.stringify(d);
     } else if (r.kind === "kanban.block") {
       // Blocage manuel (utilisé par l'UI pour suspendre une carte) — prompt = JSON {task_id, reason?}
       let meta = {};
       try { meta = r.prompt ? JSON.parse(r.prompt) : {}; } catch { meta = {}; }
       if (!meta.task_id) throw new Error("task_id required for kanban.block");
-      const args = ["kanban", "--board", BOARD, "block", "--kind", "needs_input", String(meta.task_id)];
-      if (meta.reason) args.push(String(meta.reason));
-      result = (await hermes(args, { timeout: 20000 })).trim();
+      const d = await kanbanApi(`/api/plugins/kanban/tasks/${encodeURIComponent(meta.task_id)}?board=${encodeURIComponent(BOARD)}`, {
+        method: "PATCH", body: { status: "blocked", block_reason: meta.reason ? String(meta.reason) : "Blocage manuel depuis Hermy" },
+      });
+      result = JSON.stringify(d);
     } else if (r.kind === "kanban.show") {
       // Détail complet d'une carte (body, comments, events, runs) — prompt = JSON {task_id}
       let meta = {};
       try { meta = r.prompt ? JSON.parse(r.prompt) : {}; } catch { meta = {}; }
       if (!meta.task_id) throw new Error("task_id required for kanban.show");
-      result = (await hermes(["kanban", "--board", BOARD, "show", String(meta.task_id)], { timeout: 20000 })).trim();
+      const d = await kanbanApi(`/api/plugins/kanban/tasks/${encodeURIComponent(meta.task_id)}?board=${encodeURIComponent(BOARD)}`);
+      result = JSON.stringify(d);
+    } else if (r.kind === "kanban.comment") {
+      // Commenter une carte — prompt = JSON {task_id, body, author?}
+      let meta = {};
+      try { meta = r.prompt ? JSON.parse(r.prompt) : {}; } catch { meta = {}; }
+      if (!meta.task_id) throw new Error("task_id required for kanban.comment");
+      if (!meta.body || !String(meta.body).trim()) throw new Error("body required for kanban.comment");
+      const d = await kanbanApi(`/api/plugins/kanban/tasks/${encodeURIComponent(meta.task_id)}/comments?board=${encodeURIComponent(BOARD)}`, {
+        method: "POST", body: { body: String(meta.body).trim().slice(0, 4000), author: meta.author ? String(meta.author) : "Ludo" },
+      });
+      result = JSON.stringify(d);
+    } else if (r.kind === "kanban.reassign") {
+      // Réassigner une carte — prompt = JSON {task_id, profile}
+      let meta = {};
+      try { meta = r.prompt ? JSON.parse(r.prompt) : {}; } catch { meta = {}; }
+      if (!meta.task_id) throw new Error("task_id required for kanban.reassign");
+      if (!meta.profile) throw new Error("profile required for kanban.reassign");
+      const d = await kanbanApi(`/api/plugins/kanban/tasks/${encodeURIComponent(meta.task_id)}?board=${encodeURIComponent(BOARD)}`, {
+        method: "PATCH", body: { assignee: String(meta.profile) },
+      });
+      result = JSON.stringify(d);
+    } else if (r.kind === "kanban.complete") {
+      // Compléter une carte — prompt = JSON {task_id, summary?}
+      let meta = {};
+      try { meta = r.prompt ? JSON.parse(r.prompt) : {}; } catch { meta = {}; }
+      if (!meta.task_id) throw new Error("task_id required for kanban.complete");
+      const d = await kanbanApi(`/api/plugins/kanban/tasks/${encodeURIComponent(meta.task_id)}?board=${encodeURIComponent(BOARD)}`, {
+        method: "PATCH", body: { status: "done", summary: meta.summary ? String(meta.summary).slice(0, 2000) : undefined },
+      });
+      result = JSON.stringify(d);
     } else if (r.kind.startsWith("cron.")) {
       const op = r.kind.split(".")[1];
       const a = JSON.parse(r.prompt || "{}");
