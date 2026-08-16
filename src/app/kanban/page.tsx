@@ -67,10 +67,12 @@ async function getJSON<T>(url: string): Promise<T | null> {
 function TaskDetail({ task, onClose, onValidated }: { task: Task; onClose: () => void; onValidated: () => void }) {
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<string | null>(null);
+  const [direction, setDirection] = useState("");
 
   const unblock = async () => {
     setBusy(true);
     setNote(null);
+    const dir = direction.trim();
     try {
       const r = await fetch("/api/hermes/dispatch", {
         method: "POST",
@@ -78,7 +80,11 @@ function TaskDetail({ task, onClose, onValidated }: { task: Task; onClose: () =>
         body: JSON.stringify({
           kind: "kanban.unblock",
           title: `kanban unblock ${task.id}`,
-          prompt: JSON.stringify({ task_id: task.id, reason: "Validée manuellement depuis Hermy" }),
+          prompt: JSON.stringify({
+            task_id: task.id,
+            reason: dir ? `Validée manuellement — ${dir}` : "Validée manuellement depuis Hermy",
+            direction: dir || undefined,
+          }),
         }),
       });
       if (r.ok) {
@@ -163,22 +169,32 @@ function TaskDetail({ task, onClose, onValidated }: { task: Task; onClose: () =>
       {note && <p className="mt-3 text-[12.5px] text-[var(--text-2)]">{note}</p>}
 
       {task.status === "blocked" && (
-        <div className="mt-5 flex items-center gap-2">
-          <button
-            type="button"
-            onClick={unblock}
-            disabled={busy}
-            className="inline-flex items-center gap-1.5 rounded-full px-4 py-2 text-[12.5px] font-semibold transition-colors"
-            style={{
-              color: "var(--up)",
-              border: "1px solid color-mix(in srgb, var(--up) 35%, transparent)",
-              background: "color-mix(in srgb, var(--up) 10%, transparent)",
-              opacity: busy ? 0.5 : 1,
-            }}
-          >
-            <Check className="w-3.5 h-3.5" />
-            {busy ? "Validation…" : "✅ Valider (débloquer)"}
-          </button>
+        <div className="mt-5">
+          <Eyebrow>Décision</Eyebrow>
+          <textarea
+            value={direction}
+            onChange={(e) => setDirection(e.target.value)}
+            rows={2}
+            placeholder="Consigne pour l'agent (ex : méthode B, ou précision sur ce que tu veux)… optionnel"
+            className="w-full mt-2 bg-transparent text-[13px] text-[var(--text-2)] placeholder:text-[var(--text-3)] px-3.5 py-2.5 rounded-[10px] border border-[var(--line)] focus:border-[color-mix(in_srgb,var(--accent)_45%,transparent)] outline-none resize-y"
+          />
+          <div className="mt-3 flex items-center gap-2">
+            <button
+              type="button"
+              onClick={unblock}
+              disabled={busy}
+              className="inline-flex items-center gap-1.5 rounded-full px-4 py-2 text-[12.5px] font-semibold transition-colors"
+              style={{
+                color: "var(--up)",
+                border: "1px solid color-mix(in srgb, var(--up) 35%, transparent)",
+                background: "color-mix(in srgb, var(--up) 10%, transparent)",
+                opacity: busy ? 0.5 : 1,
+              }}
+            >
+              <Check className="w-3.5 h-3.5" />
+              {busy ? "Validation…" : direction.trim() ? "Valider avec cette consigne" : "✅ Valider (débloquer)"}
+            </button>
+          </div>
         </div>
       )}
     </Panel>
