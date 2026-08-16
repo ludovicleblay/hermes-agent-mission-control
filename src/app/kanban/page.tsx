@@ -647,6 +647,13 @@ export default function KanbanPage() {
     return () => clearInterval(iv);
   }, [load]);
 
+  // Sélection depuis l'URL (ex. lien du Dashboard : /kanban?task=<id>)
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const task = params.get("task");
+    if (task) setSelectedId(task);
+  }, []);
+
   const manualRefresh = async () => {
     setRefreshing(true);
     await load();

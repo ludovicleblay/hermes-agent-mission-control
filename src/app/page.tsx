@@ -84,7 +84,7 @@ function HermesKanbanPanel({ kanban }: { kanban: HermesKanban }) {
       {kanban.tasks.length === 0 ? <Empty>Aucune tâche active.</Empty> : (
         <div className="space-y-0">
           {kanban.tasks.slice(0, 6).map((t) => (
-            <a key={t.id} href="/tasks" className="flex items-center gap-3 py-2.5 border-b border-[var(--hq-hairline)] last:border-0 hover:opacity-100 transition-opacity">
+            <a key={t.id} href={`/kanban?task=${t.id}`} className="flex items-center gap-3 py-2.5 border-b border-[var(--hq-hairline)] last:border-0 hover:opacity-100 transition-opacity">
               <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: statusColor(t.status) }} />
               <p className="text-[13px] text-[var(--hq-text-dim)] leading-snug line-clamp-1 flex-1 group-hover:text-[var(--hq-text)]">{t.title}</p>
               {t.assignee && <span className="num text-[10.5px] text-[var(--hq-text-ghost)] shrink-0">{t.assignee}</span>}
