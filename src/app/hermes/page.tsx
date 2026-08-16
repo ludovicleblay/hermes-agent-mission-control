@@ -191,6 +191,10 @@ function HealthChip({ health }: { health: Health | null }) {
 // ── Dispatch bar ──────────────────────────────────────────
 function DispatchBar({ onDone }: { onDone: () => void }) {
   const [text, setText] = useState("");
+  const [mode, setMode] = useState<"oneshot" | "kanban">("oneshot");
+  const [assignee, setAssignee] = useState("jarvis");
+  const [priority, setPriority] = useState(3);
+  const [body, setBody] = useState("");
   const [side, setSide] = useState(false);
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
@@ -208,17 +212,32 @@ function DispatchBar({ onDone }: { onDone: () => void }) {
     if (!title || busy) return;
     setBusy(true);
     try {
+      const payload: Record<string, unknown> = {
+        kind: mode,
+        title,
+        sideEffecting: side,
+      };
+      if (mode === "kanban") {
+        payload.assignee = assignee;
+        payload.priority = priority;
+        if (body.trim()) payload.body = body.trim();
+      } else if (body.trim()) {
+        payload.prompt = body.trim();
+      }
       const r = await fetch("/api/hermes/dispatch", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ kind: "oneshot", title, sideEffecting: side }),
+        body: JSON.stringify(payload),
       });
       if (r.ok) {
         setText("");
+        setBody("");
         flash(
-          side
-            ? "Sent to approval inbox — awaiting your go-ahead."
-            : "Queued for Hermes."
+          mode === "kanban"
+            ? `Kanban card queued — the dispatcher will pick it up (assignee: ${assignee}).`
+            : side
+              ? "Sent to approval inbox — awaiting your go-ahead."
+              : "Queued for Hermes."
         );
         onDone();
       } else {
@@ -231,19 +250,67 @@ function DispatchBar({ onDone }: { onDone: () => void }) {
     }
   };
 
+  const modeBtn = (m: "oneshot" | "kanban", label: string) => (
+    <button
+      type="button"
+      onClick={() => setMode(m)}
+      className="px-3 py-1.5 rounded-full text-[12px] font-semibold transition-colors"
+      style={
+        mode === m
+          ? { background: "color-mix(in srgb, var(--accent) 18%, transparent)", color: "var(--accent)", border: "1px solid color-mix(in srgb, var(--accent) 35%, transparent)" }
+          : { color: "var(--text-2)", border: "1px solid var(--line)" }
+      }
+    >
+      {label}
+    </button>
+  );
+
   return (
     <Panel className="p-5">
-      <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+      <div className="flex items-center gap-2 mb-3">
+        {modeBtn("oneshot", "⚡ Demande ponctuelle")}
+        {modeBtn("kanban", "📋 Carte kanban (agent)")}
+      </div>
+      <div className="flex flex-col gap-3">
         <input
           value={text}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === "Enter") { e.preventDefault(); submit(); }
+            if (e.key === "Enter" && mode === "oneshot" && !e.shiftKey) { e.preventDefault(); submit(); }
           }}
-          placeholder="Ask or tell Hermes to do something…"
+          placeholder={mode === "kanban" ? "Titre de la carte kanban…" : "Ask or tell Hermes to do something…"}
           className="flex-1 min-w-0 bg-transparent text-[14px] text-[var(--text)] placeholder:text-[var(--text-3)] px-3.5 py-2.5 rounded-[10px] border border-[var(--line)] focus:border-[color-mix(in_srgb,var(--accent)_45%,transparent)] outline-none transition-colors"
         />
-        <div className="flex items-center gap-3 shrink-0">
+        {mode === "kanban" && (
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+            <select
+              value={assignee}
+              onChange={(e) => setAssignee(e.target.value)}
+              className="bg-transparent text-[12.5px] text-[var(--text-2)] px-3 py-2 rounded-[8px] border border-[var(--line)] outline-none"
+            >
+              <option value="jarvis">jarvis 🧠</option>
+              <option value="toad">toad 🍄</option>
+              <option value="">non assignée (triage)</option>
+            </select>
+            <select
+              value={priority}
+              onChange={(e) => setPriority(Number(e.target.value))}
+              className="bg-transparent text-[12.5px] text-[var(--text-2)] px-3 py-2 rounded-[8px] border border-[var(--line)] outline-none"
+            >
+              {[5, 4, 3, 2, 1].map((p) => (
+                <option key={p} value={p}>Priorité P{p}</option>
+              ))}
+            </select>
+          </div>
+        )}
+        <textarea
+          value={body}
+          onChange={(e) => setBody(e.target.value)}
+          rows={mode === "kanban" ? 3 : 2}
+          placeholder={mode === "kanban" ? "Description / instructions pour l'agent…" : "Instructions détaillées (optionnel)…"}
+          className="w-full bg-transparent text-[13px] text-[var(--text-2)] placeholder:text-[var(--text-3)] px-3.5 py-2.5 rounded-[10px] border border-[var(--line)] focus:border-[color-mix(in_srgb,var(--accent)_45%,transparent)] outline-none resize-y"
+        />
+        <div className="flex items-center gap-3">
           <button
             type="button"
             onClick={() => setSide((s) => !s)}
@@ -270,7 +337,7 @@ function DispatchBar({ onDone }: { onDone: () => void }) {
           </button>
           <Button variant="primary" onClick={submit} disabled={busy || !text.trim()}>
             <Send className="w-3.5 h-3.5" />
-            Dispatch
+            {mode === "kanban" ? "Créer la carte" : "Dispatch"}
           </Button>
         </div>
       </div>
