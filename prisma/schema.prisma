@@ -375,6 +375,8 @@ model HermesTask {
   id        String   @id                   // Hermes task id
   board     String   @default("default")
   title     String
+  body      String?
+  detail    String?
   assignee  String?
   status    String   @default("todo")
   priority  Int?

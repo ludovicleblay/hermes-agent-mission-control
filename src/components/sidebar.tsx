@@ -12,6 +12,7 @@ import {
   Newspaper,
   Menu,
   X,
+  LayoutGrid,
 } from "lucide-react";
 
 const navGroups = [
@@ -19,6 +20,7 @@ const navGroups = [
     name: "Overview",
     items: [
       { href: "/", label: "Dashboard", icon: Home },
+      { href: "/kanban", label: "Kanban", icon: LayoutGrid },
       { href: "/hermes", label: "Hermes", icon: Cpu },
       { href: "/tasks", label: "Tasks", icon: ClipboardList },
       { href: "/briefs", label: "Briefs", icon: Newspaper },
