@@ -95,11 +95,21 @@ function TaskDetail({ task, onClose, onValidated }: { task: Task; onClose: () =>
   };
 
   // extrait les comments du détail (sortie `hermes kanban show`)
-  const comments = task.detail
-    ? [...task.detail.matchAll(/\[(.*?)\] (\w+): ([\s\S]*?)(?=\n\s*\[|\n\n|$)/g)].map((m) => ({
-        when: m[1], who: m[2], text: m[3].trim(),
-      }))
-    : [];
+  // Section "Comments (N):" → chaque entrée démarre par une ligne "  [date] author:"
+  const comments = (() => {
+    if (!task.detail) return [];
+    const section = task.detail.split(/\nComments \(\d+\):\n/)[1];
+    if (!section) return [];
+    return section
+      .split(/^\s*\[/m)
+      .filter(Boolean)
+      .map((block) => {
+        const m = block.match(/^(.*?)\]\s+(\w+):\s*([\s\S]*)$/);
+        if (!m) return null;
+        return { when: m[1], who: m[2], text: m[3].trim() };
+      })
+      .filter((c): c is { when: string; who: string; text: string } => c !== null);
+  })();
 
   return (
     <Panel className="p-5 sticky top-4 max-h-[calc(100vh-2rem)] overflow-y-auto">

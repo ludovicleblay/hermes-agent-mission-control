@@ -2,7 +2,6 @@
 
 import { useEffect, useState } from "react";
 import { HermesBriefing } from "@/components/hermes-briefing";
-import { ApprovalInbox } from "@/components/approval-inbox";
 
 // ── Types ─────────────────────────────────────────────────
 interface Process { name: string; status: string; uptime: string }
@@ -169,14 +168,9 @@ export default function Dashboard() {
           </div>
         </div>
 
-        {/* ── Brief + Approval inbox (side-by-side on wide) ─ */}
-        <div className="mt-5 grid grid-cols-1 xl:grid-cols-3 gap-5 items-start">
-          <div className="xl:col-span-2 hq-rise" style={rise(1)}>
-            <HermesBriefing />
-          </div>
-          <div className="xl:col-span-1 hq-rise" style={rise(2)}>
-            <ApprovalInbox compact />
-          </div>
+        {/* ── Brief matinal ───────────────────────────────── */}
+        <div className="mt-5 hq-rise" style={rise(1)}>
+          <HermesBriefing />
         </div>
 
         {/* ── Hermes board ───────────────────────────────── */}
