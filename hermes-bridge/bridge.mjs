@@ -242,6 +242,18 @@ async function setStore(key, data) {
   );
 }
 
+// ── Suivi des runs kanban déjà émis (anti-doublon, seed depuis la BDD au boot) ──
+const emittedRuns = new Set();
+async function seedEmittedRuns() {
+  try {
+    const res = await q(`SELECT meta FROM "AgentEvent" WHERE kind='run' AND meta IS NOT NULL`);
+    for (const row of res.rows) {
+      try { const m = JSON.parse(row.meta); if (m?.runId) emittedRuns.add(m.runId); } catch { /* meta illisible */ }
+    }
+    log(`seed emittedRuns: ${emittedRuns.size} run(s) déjà émis`);
+  } catch (e) { log("seed emittedRuns err:", e.message.split("\n")[0]); }
+}
+
 /* ─────────────── PULL: mirror Hermes → Postgres ─────────────── */
 let lastDetailAt = {}; // id -> ts du dernier détail récupéré
 let lastStatus = {};   // id -> statut au dernier détail
@@ -300,6 +312,23 @@ async function mirrorKanban() {
           detailJson = out.trim();
         }
         await q(`UPDATE "HermesTask" SET detail=$1, "syncedAt"=now() WHERE id=$2`, [String(detailJson).slice(0, 30000), id]);
+        // Émettre un event par run kanban nouveau (worker natif) — agent = profil du run
+        try {
+          const parsed = JSON.parse(detailJson);
+          const runs = parsed?.runs || [];
+          for (const run of runs) {
+            if (!run?.id || emittedRuns.has(run.id)) continue;
+            emittedRuns.add(run.id);
+            const ended = !!run.ended_at;
+            const ok = !run.error && run.outcome !== "failed" && run.outcome !== "crashed";
+            await emit("run", `${ended ? "Done" : "Started"}: ${String(t.title ?? "untitled").slice(0, 120)}`, {
+              agent: run.profile || t.assignee || "hermes",
+              level: ended ? (ok ? "up" : "down") : "info",
+              detail: ended ? String(run.summary || run.error || "").slice(0, 400) : null,
+              meta: { runId: run.id, cardId: id },
+            });
+          }
+        } catch (e) { /* détail non-JSON → ignore */ }
         lastDetailAt[id] = now;
         lastStatus[id] = status;
       } catch (e) { log("kanban detail failed:", String(e.message || e).split("\n")[0]); }
@@ -460,7 +489,15 @@ async function maybeDailyBrief() {
 /* ─────────────── PUSH: run website requests via Hermes ─────────────── */
 async function runRequest(r) {
   await q(`UPDATE "AgentRequest" SET status='running', "startedAt"=now(), "updatedAt"=now() WHERE id=$1`, [r.id]);
-  await emit("run", `Started: ${r.title}`, { level: "info", meta: { requestId: r.id, kind: r.kind } });
+  // Agent réel : carte kanban → assignee, sinon hermes (runs génériques)
+  let agentName = "hermes";
+  if (r.hermesTaskId) {
+    try {
+      const t = await q(`SELECT assignee FROM "HermesTask" WHERE id=$1`, [r.hermesTaskId]);
+      if (t.rows[0]?.assignee) agentName = t.rows[0].assignee;
+    } catch (e) { /* colonne/table absente → hermes */ }
+  }
+  await emit("run", `Started: ${r.title}`, { level: "info", agent: agentName, meta: { requestId: r.id, kind: r.kind } });
   try {
     let result = "";
     if (r.kind === "oneshot" || r.kind === "chat") {
@@ -573,11 +610,11 @@ async function runRequest(r) {
     }
     await q(`UPDATE "AgentRequest" SET status='done', result=$2, "finishedAt"=now(), "updatedAt"=now() WHERE id=$1`,
       [r.id, result.slice(0, 8000)]);
-    await emit("run", `Done: ${r.title}`, { level: "up", detail: result.slice(0, 400), meta: { requestId: r.id } });
+    await emit("run", `Done: ${r.title}`, { level: "up", agent: agentName, detail: result.slice(0, 400), meta: { requestId: r.id } });
   } catch (e) {
     const msg = (e.stderr || e.message || "error").toString().split("\n")[0].slice(0, 600);
     await q(`UPDATE "AgentRequest" SET status='failed', error=$2, "finishedAt"=now(), "updatedAt"=now() WHERE id=$1`, [r.id, msg]);
-    await emit("run", `Failed: ${r.title}`, { level: "down", detail: msg, meta: { requestId: r.id } });
+    await emit("run", `Failed: ${r.title}`, { level: "down", agent: agentName, detail: msg, meta: { requestId: r.id } });
     log("request failed:", r.id, msg);
   }
 }
@@ -629,6 +666,7 @@ async function mirrorTick() {
 
 async function main() {
   log(`hermes-bridge up · board=${BOARD} · poll=${POLL_MS}ms · mirror=${MIRROR_MS}ms`);
+  await seedEmittedRuns();
   await emit("status", "Bridge connected", { level: "up" });
   await mirrorTick();
   setInterval(() => mirrorTick().catch((e) => log("mirror loop", e.message)), MIRROR_MS);
