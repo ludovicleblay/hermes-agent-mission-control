@@ -11,7 +11,6 @@ import {
   Clock,
   Zap,
   Activity as ActivityIcon,
-  LayoutGrid,
   Pause,
   Play,
 } from "lucide-react";
@@ -63,17 +62,6 @@ interface Ev {
   createdAt: string;
 }
 
-interface Task {
-  id: string;
-  board: string;
-  title: string;
-  assignee: string | null;
-  status: string;
-  priority: number | null;
-  result: string | null;
-  syncedAt: string;
-}
-
 interface Health {
   online: boolean;
   gateway: string | null;
@@ -105,44 +93,6 @@ async function getJSON<T>(url: string): Promise<T | null> {
     return null;
   }
 }
-
-// ── Task board column order ───────────────────────────────
-const COLUMN_ORDER = [
-  "triage",
-  "todo",
-  "ready",
-  "running",
-  "review",
-  "blocked",
-  "done",
-] as const;
-
-function normStatus(s: string): string {
-  return s.toLowerCase().replace(/[\s_-]+/g, "");
-}
-function columnFor(status: string): string {
-  const k = normStatus(status);
-  for (const c of COLUMN_ORDER) if (k.includes(c)) return c;
-  if (k.includes("progress") || k.includes("doing")) return "running";
-  if (k.includes("complete")) return "done";
-  return "triage";
-}
-function columnTone(col: string): "neutral" | "up" | "down" | "warn" | "accent" {
-  if (col === "done") return "up";
-  if (col === "running") return "accent";
-  if (col === "blocked") return "down";
-  if (col === "review") return "warn";
-  return "neutral";
-}
-const COLUMN_LABEL: Record<string, string> = {
-  triage: "Triage",
-  todo: "To do",
-  ready: "Ready",
-  running: "Running",
-  review: "Review",
-  blocked: "Blocked",
-  done: "Done",
-};
 
 function levelColor(l: EvLevel): string {
   if (l === "up") return "var(--up)";
@@ -189,11 +139,9 @@ function HealthChip({ health }: { health: Health | null }) {
 }
 
 // ── Dispatch bar ──────────────────────────────────────────
+// ── Dispatch bar (oneshot uniquement — le kanban vit sur /kanban) ──
 function DispatchBar({ onDone }: { onDone: () => void }) {
   const [text, setText] = useState("");
-  const [mode, setMode] = useState<"oneshot" | "kanban">("oneshot");
-  const [assignee, setAssignee] = useState("jarvis");
-  const [priority, setPriority] = useState(3);
   const [body, setBody] = useState("");
   const [side, setSide] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -213,17 +161,11 @@ function DispatchBar({ onDone }: { onDone: () => void }) {
     setBusy(true);
     try {
       const payload: Record<string, unknown> = {
-        kind: mode,
+        kind: "oneshot",
         title,
         sideEffecting: side,
       };
-      if (mode === "kanban") {
-        payload.assignee = assignee;
-        payload.priority = priority;
-        if (body.trim()) payload.body = body.trim();
-      } else if (body.trim()) {
-        payload.prompt = body.trim();
-      }
+      if (body.trim()) payload.prompt = body.trim();
       const r = await fetch("/api/hermes/dispatch", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -233,11 +175,9 @@ function DispatchBar({ onDone }: { onDone: () => void }) {
         setText("");
         setBody("");
         flash(
-          mode === "kanban"
-            ? `Kanban card queued — the dispatcher will pick it up (assignee: ${assignee}).`
-            : side
-              ? "Sent to approval inbox — awaiting your go-ahead."
-              : "Queued for Hermes."
+          side
+            ? "Sent to approval inbox — awaiting your go-ahead."
+            : "Queued for Hermes."
         );
         onDone();
       } else {
@@ -250,64 +190,23 @@ function DispatchBar({ onDone }: { onDone: () => void }) {
     }
   };
 
-  const modeBtn = (m: "oneshot" | "kanban", label: string) => (
-    <button
-      type="button"
-      onClick={() => setMode(m)}
-      className="px-3 py-1.5 rounded-full text-[12px] font-semibold transition-colors"
-      style={
-        mode === m
-          ? { background: "color-mix(in srgb, var(--accent) 18%, transparent)", color: "var(--accent)", border: "1px solid color-mix(in srgb, var(--accent) 35%, transparent)" }
-          : { color: "var(--text-2)", border: "1px solid var(--line)" }
-      }
-    >
-      {label}
-    </button>
-  );
-
   return (
     <Panel className="p-5">
-      <div className="flex items-center gap-2 mb-3">
-        {modeBtn("oneshot", "⚡ Demande ponctuelle")}
-        {modeBtn("kanban", "📋 Carte kanban (agent)")}
-      </div>
       <div className="flex flex-col gap-3">
         <input
           value={text}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === "Enter" && mode === "oneshot" && !e.shiftKey) { e.preventDefault(); submit(); }
+            if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(); }
           }}
-          placeholder={mode === "kanban" ? "Titre de la carte kanban…" : "Ask or tell Hermes to do something…"}
+          placeholder="Ask or tell Hermes to do something…"
           className="flex-1 min-w-0 bg-transparent text-[14px] text-[var(--text)] placeholder:text-[var(--text-3)] px-3.5 py-2.5 rounded-[10px] border border-[var(--line)] focus:border-[color-mix(in_srgb,var(--accent)_45%,transparent)] outline-none transition-colors"
         />
-        {mode === "kanban" && (
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-            <select
-              value={assignee}
-              onChange={(e) => setAssignee(e.target.value)}
-              className="bg-transparent text-[12.5px] text-[var(--text-2)] px-3 py-2 rounded-[8px] border border-[var(--line)] outline-none"
-            >
-              <option value="jarvis">jarvis 🧠</option>
-              <option value="toad">toad 🍄</option>
-              <option value="">non assignée (triage)</option>
-            </select>
-            <select
-              value={priority}
-              onChange={(e) => setPriority(Number(e.target.value))}
-              className="bg-transparent text-[12.5px] text-[var(--text-2)] px-3 py-2 rounded-[8px] border border-[var(--line)] outline-none"
-            >
-              {[5, 4, 3, 2, 1].map((p) => (
-                <option key={p} value={p}>Priorité P{p}</option>
-              ))}
-            </select>
-          </div>
-        )}
         <textarea
           value={body}
           onChange={(e) => setBody(e.target.value)}
-          rows={mode === "kanban" ? 3 : 2}
-          placeholder={mode === "kanban" ? "Description / instructions pour l'agent…" : "Instructions détaillées (optionnel)…"}
+          rows={2}
+          placeholder="Instructions détaillées (optionnel)…"
           className="w-full bg-transparent text-[13px] text-[var(--text-2)] placeholder:text-[var(--text-3)] px-3.5 py-2.5 rounded-[10px] border border-[var(--line)] focus:border-[color-mix(in_srgb,var(--accent)_45%,transparent)] outline-none resize-y"
         />
         <div className="flex items-center gap-3">
@@ -337,7 +236,7 @@ function DispatchBar({ onDone }: { onDone: () => void }) {
           </button>
           <Button variant="primary" onClick={submit} disabled={busy || !text.trim()}>
             <Send className="w-3.5 h-3.5" />
-            {mode === "kanban" ? "Créer la carte" : "Dispatch"}
+            Dispatch
           </Button>
         </div>
       </div>
@@ -481,137 +380,6 @@ function InboxCard({ req, onAction }: { req: Req; onAction: () => void }) {
         )}
       </div>
     </Panel>
-  );
-}
-
-// ── Task board ────────────────────────────────────────────
-function TaskBoard({
-  tasks,
-  total,
-  lastSync,
-  onAction,
-}: {
-  tasks: Task[];
-  total: number;
-  lastSync: string | null;
-  onAction: () => void;
-}) {
-  const [busyId, setBusyId] = useState<string | null>(null);
-  const groups: Record<string, Task[]> = {};
-  for (const t of tasks) {
-    const col = columnFor(t.status);
-    (groups[col] ||= []).push(t);
-  }
-  const cols = COLUMN_ORDER.filter((c) => groups[c]?.length);
-
-  const act = async (kind: string, taskId: string, reason?: string) => {
-    setBusyId(taskId);
-    try {
-      const r = await fetch("/api/hermes/dispatch", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          kind,
-          title: `kanban ${kind} ${taskId}`,
-          prompt: JSON.stringify({ task_id: taskId, reason: reason || "Validée manuellement depuis Hermy" }),
-        }),
-      });
-      if (r.ok) setTimeout(onAction, 2500); // laisse le bridge traiter avant refresh
-    } catch { /* silencieux */ } finally {
-      setBusyId(null);
-    }
-  };
-
-  return (
-    <>
-      <SectionHeader
-        label="Task board"
-        title="Hermes kanban"
-        action={
-          <div className="flex items-center gap-3">
-            <span className="num text-[12px] text-[var(--text-2)]">{total} total</span>
-            <span className="num text-[11px] text-[var(--text-3)]">
-              synced {timeAgo(lastSync)}
-            </span>
-          </div>
-        }
-      />
-      {tasks.length === 0 ? (
-        <Panel className="p-2">
-          <EmptyState
-            icon={<LayoutGrid className="w-6 h-6" />}
-            title="No tasks on the board"
-            hint="Dispatched work and synced kanban cards will show up here."
-          />
-        </Panel>
-      ) : (
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-          {cols.map((col) => {
-            const tone = columnTone(col);
-            return (
-              <div key={col} className="flex flex-col gap-2.5">
-                <div className="flex items-center justify-between px-1">
-                  <Eyebrow>{COLUMN_LABEL[col]}</Eyebrow>
-                  <span className="num text-[11px] text-[var(--text-3)]">
-                    {groups[col].length}
-                  </span>
-                </div>
-                <div className="flex flex-col gap-2.5">
-                  {groups[col]
-                    .sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0))
-                    .map((t) => (
-                      <div
-                        key={t.id}
-                        className="panel p-3.5"
-                        style={{
-                          borderLeft: `2px solid color-mix(in srgb, ${
-                            tone === "neutral" ? "var(--text-3)" : `var(--${tone})`
-                          } 55%, transparent)`,
-                        }}
-                      >
-                        <p className="text-[13px] text-[var(--text)] leading-snug line-clamp-2">
-                          {t.title}
-                        </p>
-                        <div className="flex items-center gap-2 mt-2.5">
-                          {t.assignee && (
-                            <span className="num text-[10.5px] text-[var(--text-3)]">
-                              {t.assignee}
-                            </span>
-                          )}
-                          {t.priority != null && t.priority > 0 && (
-                            <span className="num text-[10.5px] text-[var(--text-3)] ml-auto">
-                              P{t.priority}
-                            </span>
-                          )}
-                        </div>
-                        {t.status === "blocked" && (
-                          <div className="mt-2.5 flex items-center gap-2">
-                            <button
-                              type="button"
-                              onClick={() => act("kanban.unblock", t.id)}
-                              disabled={busyId === t.id}
-                              className="inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[11.5px] font-semibold transition-colors"
-                              style={{
-                                color: "var(--up)",
-                                border: "1px solid color-mix(in srgb, var(--up) 35%, transparent)",
-                                background: "color-mix(in srgb, var(--up) 10%, transparent)",
-                                opacity: busyId === t.id ? 0.5 : 1,
-                              }}
-                            >
-                              <Check className="w-3 h-3" />
-                              {busyId === t.id ? "Validation…" : "✅ Valider (débloquer)"}
-                            </button>
-                          </div>
-                        )}
-                      </div>
-                    ))}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      )}
-    </>
   );
 }
 
@@ -845,24 +613,18 @@ export default function HermesPage() {
   const [inbox, setInbox] = useState<Req[]>([]);
   const [pending, setPending] = useState(0);
   const [events, setEvents] = useState<Ev[]>([]);
-  const [tasks, setTasks] = useState<Task[]>([]);
-  const [taskTotal, setTaskTotal] = useState(0);
-  const [taskSync, setTaskSync] = useState<string | null>(null);
   const [jobs, setJobs] = useState<CronJob[]>([]);
   const [cronSync, setCronSync] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
 
   const load = useCallback(async () => {
-    const [h, reqs, act, tk, cr] = await Promise.all([
+    const [h, reqs, act, cr] = await Promise.all([
       getJSON<Health>("/api/hermes/health"),
       getJSON<{ requests: Req[]; pending: number }>(
         "/api/hermes/requests?status=awaiting_approval&take=50"
       ),
       getJSON<{ events: Ev[] }>("/api/hermes/activity?take=40"),
-      getJSON<{ tasks: Task[]; counts: Record<string, number>; total: number; lastSync: string }>(
-        "/api/hermes/tasks"
-      ),
       getJSON<{ jobs: CronJob[]; syncedAt: string }>("/api/hermes/crons"),
     ]);
     if (h) setHealth(h);
@@ -871,11 +633,6 @@ export default function HermesPage() {
       setPending(reqs.pending ?? reqs.requests?.length ?? 0);
     }
     if (act) setEvents(act.events ?? []);
-    if (tk) {
-      setTasks(tk.tasks ?? []);
-      setTaskTotal(tk.total ?? tk.tasks?.length ?? 0);
-      setTaskSync(tk.lastSync ?? null);
-    }
     if (cr) {
       setJobs(cr.jobs ?? []);
       setCronSync(cr.syncedAt ?? null);
@@ -961,22 +718,6 @@ export default function HermesPage() {
                 <InboxCard key={req.id} req={req} onAction={load} />
               ))}
             </div>
-          )}
-        </section>
-
-        {/* Task board */}
-        <section className="mt-12">
-          {!loaded ? (
-            <>
-              <SectionHeader label="Task board" title="Hermes kanban" />
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-                <Skeleton className="h-48" />
-                <Skeleton className="h-48" />
-                <Skeleton className="h-48" />
-              </div>
-            </>
-          ) : (
-            <TaskBoard tasks={tasks} total={taskTotal} lastSync={taskSync} onAction={load} />
           )}
         </section>
 

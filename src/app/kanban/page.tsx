@@ -1,16 +1,18 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Check,
   RefreshCw,
   X,
   LayoutGrid,
   ShieldAlert,
+  Send,
 } from "lucide-react";
 import {
   Panel,
   SectionHeader,
+  Button,
   Pill,
   EmptyState,
   Skeleton,
@@ -173,6 +175,111 @@ function TaskDetail({ task, onClose, onValidated }: { task: Task; onClose: () =>
   );
 }
 
+// ── Création de carte kanban ─────────────────────────────
+function CreateCard({ onDone }: { onDone: () => void }) {
+  const [title, setTitle] = useState("");
+  const [assignee, setAssignee] = useState("jarvis");
+  const [priority, setPriority] = useState(3);
+  const [body, setBody] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [toast, setToast] = useState<string | null>(null);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const flash = (msg: string) => {
+    setToast(msg);
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = setTimeout(() => setToast(null), 4000);
+  };
+  useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
+
+  const submit = async () => {
+    const t = title.trim();
+    if (!t || busy) return;
+    setBusy(true);
+    try {
+      const payload: Record<string, unknown> = {
+        kind: "kanban",
+        title: t,
+        assignee,
+        priority,
+      };
+      if (body.trim()) payload.body = body.trim();
+      const r = await fetch("/api/hermes/dispatch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (r.ok) {
+        setTitle("");
+        setBody("");
+        flash(`Carte créée — le dispatcher va la prendre (assignee: ${assignee || "triage"}).`);
+        setTimeout(onDone, 2500);
+      } else {
+        flash("Échec de la création. Réessaie.");
+      }
+    } catch {
+      flash("Échec de la création. Réessaie.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Panel className="p-5">
+      <div className="flex flex-col gap-3">
+        <input
+          value={title}
+          onChange={(e) => setTitle(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(); }
+          }}
+          placeholder="Titre de la carte kanban…"
+          className="w-full bg-transparent text-[14px] text-[var(--text)] placeholder:text-[var(--text-3)] px-3.5 py-2.5 rounded-[10px] border border-[var(--line)] focus:border-[color-mix(in_srgb,var(--accent)_45%,transparent)] outline-none transition-colors"
+        />
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+          <select
+            value={assignee}
+            onChange={(e) => setAssignee(e.target.value)}
+            className="bg-transparent text-[12.5px] text-[var(--text-2)] px-3 py-2 rounded-[8px] border border-[var(--line)] outline-none"
+          >
+            <option value="jarvis">jarvis 🧠</option>
+            <option value="toad">toad 🍄</option>
+            <option value="">non assignée (triage)</option>
+          </select>
+          <select
+            value={priority}
+            onChange={(e) => setPriority(Number(e.target.value))}
+            className="bg-transparent text-[12.5px] text-[var(--text-2)] px-3 py-2 rounded-[8px] border border-[var(--line)] outline-none"
+          >
+            {[5, 4, 3, 2, 1].map((p) => (
+              <option key={p} value={p}>Priorité P{p}</option>
+            ))}
+          </select>
+        </div>
+        <textarea
+          value={body}
+          onChange={(e) => setBody(e.target.value)}
+          rows={3}
+          placeholder="Description / instructions pour l'agent…"
+          className="w-full bg-transparent text-[13px] text-[var(--text-2)] placeholder:text-[var(--text-3)] px-3.5 py-2.5 rounded-[10px] border border-[var(--line)] focus:border-[color-mix(in_srgb,var(--accent)_45%,transparent)] outline-none resize-y"
+        />
+        <div className="flex items-center gap-3">
+          <Button variant="primary" onClick={submit} disabled={busy || !title.trim()}>
+            <Send className="w-3.5 h-3.5" />
+            {busy ? "Création…" : "Créer la carte"}
+          </Button>
+        </div>
+      </div>
+      {toast && (
+        <p className="mt-3 text-[12.5px] text-[var(--text-2)] flex items-center gap-1.5">
+          <Check className="w-3.5 h-3.5" style={{ color: "var(--up)" }} />
+          {toast}
+        </p>
+      )}
+    </Panel>
+  );
+}
+
 // ── Board ─────────────────────────────────────────────────
 function Board({ tasks, selectedId, onSelect }: { tasks: Task[]; selectedId: string | null; onSelect: (id: string) => void }) {
   const groups: Record<string, Task[]> = {};
@@ -296,14 +403,19 @@ export default function KanbanPage() {
         </div>
       </div>
 
+      {/* Création de carte */}
+      <div className="hq-rise">
+        <CreateCard onDone={load} />
+      </div>
+
       {!loaded ? (
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mt-12">
           {[0, 1, 2, 3].map((i) => (
             <Skeleton key={i} className="h-48" />
           ))}
         </div>
       ) : (
-        <div className="grid grid-cols-1 lg:grid-cols-[1fr_360px] gap-5 items-start">
+        <div className="grid grid-cols-1 lg:grid-cols-[1fr_360px] gap-5 items-start mt-12">
           <Board tasks={tasks} selectedId={selectedId} onSelect={setSelectedId} />
           <div>
             {selected ? (
