@@ -9,6 +9,7 @@ import {
   ClipboardList,
   Cpu,
   Brain,
+  Newspaper,
   Menu,
   X,
 } from "lucide-react";
@@ -20,6 +21,7 @@ const navGroups = [
       { href: "/", label: "Dashboard", icon: Home },
       { href: "/hermes", label: "Hermes", icon: Cpu },
       { href: "/tasks", label: "Tasks", icon: ClipboardList },
+      { href: "/briefs", label: "Briefs", icon: Newspaper },
     ],
   },
   {
