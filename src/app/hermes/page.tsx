@@ -489,17 +489,38 @@ function TaskBoard({
   tasks,
   total,
   lastSync,
+  onAction,
 }: {
   tasks: Task[];
   total: number;
   lastSync: string | null;
+  onAction: () => void;
 }) {
+  const [busyId, setBusyId] = useState<string | null>(null);
   const groups: Record<string, Task[]> = {};
   for (const t of tasks) {
     const col = columnFor(t.status);
     (groups[col] ||= []).push(t);
   }
   const cols = COLUMN_ORDER.filter((c) => groups[c]?.length);
+
+  const act = async (kind: string, taskId: string, reason?: string) => {
+    setBusyId(taskId);
+    try {
+      const r = await fetch("/api/hermes/dispatch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          kind,
+          title: `kanban ${kind} ${taskId}`,
+          prompt: JSON.stringify({ task_id: taskId, reason: reason || "Validée manuellement depuis Hermy" }),
+        }),
+      });
+      if (r.ok) setTimeout(onAction, 2500); // laisse le bridge traiter avant refresh
+    } catch { /* silencieux */ } finally {
+      setBusyId(null);
+    }
+  };
 
   return (
     <>
@@ -563,6 +584,25 @@ function TaskBoard({
                             </span>
                           )}
                         </div>
+                        {t.status === "blocked" && (
+                          <div className="mt-2.5 flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => act("kanban.unblock", t.id)}
+                              disabled={busyId === t.id}
+                              className="inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[11.5px] font-semibold transition-colors"
+                              style={{
+                                color: "var(--up)",
+                                border: "1px solid color-mix(in srgb, var(--up) 35%, transparent)",
+                                background: "color-mix(in srgb, var(--up) 10%, transparent)",
+                                opacity: busyId === t.id ? 0.5 : 1,
+                              }}
+                            >
+                              <Check className="w-3 h-3" />
+                              {busyId === t.id ? "Validation…" : "✅ Valider (débloquer)"}
+                            </button>
+                          </div>
+                        )}
                       </div>
                     ))}
                 </div>
@@ -936,7 +976,7 @@ export default function HermesPage() {
               </div>
             </>
           ) : (
-            <TaskBoard tasks={tasks} total={taskTotal} lastSync={taskSync} />
+            <TaskBoard tasks={tasks} total={taskTotal} lastSync={taskSync} onAction={load} />
           )}
         </section>
 
