@@ -5,6 +5,15 @@ import { NextResponse } from "next/server";
 // hôte .107:8000. Whitelist stricte : AUCUN endpoint d'écriture/sensible.
 const HONCHO_BASE = process.env.HONCHO_BASE_URL || "http://192.168.68.107:8000";
 
+// Ajoute ?page=&size= en query string (l'API Honcho v3 ignore le body pour paginer)
+function paginate(base: string, p: Record<string, string>): string {
+  const params = new URLSearchParams();
+  if (p.page) params.set("page", p.page);
+  if (p.size) params.set("size", p.size);
+  const qs = params.toString();
+  return qs ? `${base}?${qs}` : base;
+}
+
 const ACTIONS: Record<string, { path: (p: Record<string, string>) => string; method: string; body?: unknown }> = {
   workspaces: { path: () => "/v3/workspaces/list", method: "POST", body: {} },
   peers: {
@@ -13,7 +22,10 @@ const ACTIONS: Record<string, { path: (p: Record<string, string>) => string; met
     body: {},
   },
   sessions: {
-    path: (p) => `/v3/workspaces/${p.workspace}/peers/${p.peer}/sessions`,
+    path: (p) => {
+      const base = `/v3/workspaces/${p.workspace}/peers/${p.peer}/sessions`;
+      return paginate(base, p);
+    },
     method: "POST",
     body: {},
   },
@@ -23,9 +35,22 @@ const ACTIONS: Record<string, { path: (p: Record<string, string>) => string; met
     body: {},
   },
   conclusions: {
-    path: (p) => `/v3/workspaces/${p.workspace}/conclusions/list`,
+    path: (p) => {
+      const base = `/v3/workspaces/${p.workspace}/conclusions/list`;
+      return paginate(base, p);
+    },
     method: "POST",
     body: {},
+  },
+  conclusions_query: {
+    path: (p) => `/v3/workspaces/${p.workspace}/conclusions/query`,
+    method: "POST",
+    body: {}, // body fourni par la requête : { query, top_k }
+  },
+  chat: {
+    path: (p) => `/v3/workspaces/${p.workspace}/peers/${p.peer}/chat`,
+    method: "POST",
+    body: {}, // body fourni par la requête : { query, reasoning_level, session_id, ... }
   },
   conclusion: {
     path: (p) => `/v3/workspaces/${p.workspace}/conclusions/${p.id}`,
@@ -99,7 +124,10 @@ export async function POST(req: Request) {
     const path = spec.path(params);
     const init: RequestInit = { method: spec.method, headers: { "Content-Type": "application/json" } };
     if (spec.method === "POST") {
-      init.body = JSON.stringify(b.query !== undefined ? { query: b.query } : spec.body ?? {});
+      // Conserve les champs utiles du body (query, top_k, reasoning_level, ...) en plus de spec.body
+      const { action: _a, workspace: _w, peer: _p, id: _i, session: _s, page: _pg, size: _sz, ...extra } = b;
+      const payload = { ...(spec.body ?? {}), ...extra };
+      init.body = JSON.stringify(payload);
     }
     const r = await fetch(`${HONCHO_BASE}${path}`, init);
     const text = await r.text();

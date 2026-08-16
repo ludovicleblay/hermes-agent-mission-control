@@ -49,6 +49,15 @@ interface Conclusion {
   created_at: string;
 }
 
+// Réponse paginée Honcho v3 : { items, total, page, size, pages }
+interface Paged<T> {
+  items?: T[];
+  total?: number;
+  page?: number;
+  size?: number;
+  pages?: number;
+}
+
 interface SearchResult {
   results?: { content?: string; conclusion?: string; message?: string; [k: string]: unknown }[];
   [k: string]: unknown;
@@ -113,6 +122,44 @@ function fmtCard(card: string[] | string | null | undefined): string[] {
   return card.split("\n").filter(Boolean);
 }
 
+// Rendu markdown léger (headers, gras, listes, code) → blocs React simples
+function renderMarkdown(md: string): React.ReactNode[] {
+  const lines = md.split("\n");
+  const out: React.ReactNode[] = [];
+  let key = 0;
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line) continue;
+    if (/^#{1,4}\s/.test(line)) {
+      const text = line.replace(/^#{1,4}\s/, "").replace(/\*\*(.*?)\*\*/g, "$1");
+      out.push(
+        <p key={key++} className="font-semibold text-neutral-100 mt-1">
+          {text}
+        </p>
+      );
+    } else if (/^[-*•]\s+/.test(line)) {
+      out.push(
+        <div key={key++} className="flex gap-1.5">
+          <span className="text-neutral-500 shrink-0">•</span>
+          <span>{line.replace(/^[-*•]\s+/, "").replace(/\*\*(.*?)\*\*/g, "$1")}</span>
+        </div>
+      );
+    } else if (/^\d+\.\s+/.test(line)) {
+      out.push(
+        <div key={key++} className="flex gap-1.5">
+          <span className="text-neutral-500 shrink-0">{line.match(/^\d+/)?.[0]}.</span>
+          <span>{line.replace(/^\d+\.\s+/, "").replace(/\*\*(.*?)\*\*/g, "$1")}</span>
+        </div>
+      );
+    } else {
+      out.push(
+        <p key={key++}>{line.replace(/\*\*(.*?)\*\*/g, "$1")}</p>
+      );
+    }
+  }
+  return out;
+}
+
 // ── Page ──────────────────────────────────────────────────
 export default function MemoryDialecticPage() {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
@@ -120,6 +167,13 @@ export default function MemoryDialecticPage() {
   const [peers, setPeers] = useState<Peer[]>([]);
   const [conclusions, setConclusions] = useState<Conclusion[]>([]);
   const [sessions, setSessions] = useState<Session[]>([]);
+  const [concTotal, setConcTotal] = useState(0);
+  const [sessTotal, setSessTotal] = useState(0);
+  const [concPage, setConcPage] = useState(1);
+  const [sessPage, setSessPage] = useState(1);
+  const [concPages, setConcPages] = useState(1);
+  const [sessPages, setSessPages] = useState(1);
+  const PAGE_SIZE = 30;
   const [loading, setLoading] = useState(true);
   const [searching, setSearching] = useState(false);
   const [query, setQuery] = useState("");
@@ -132,6 +186,18 @@ export default function MemoryDialecticPage() {
   const [sessionSummaries, setSessionSummaries] = useState<unknown[]>([]);
   const [detailLoading, setDetailLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+
+  // Recherche ciblée conclusions
+  const [concQuery, setConcQuery] = useState("");
+  const [concSearching, setConcSearching] = useState(false);
+  const [concResults, setConcResults] = useState<Conclusion[] | null>(null);
+
+  // Chat dialectic
+  const [chatPeer, setChatPeer] = useState("ludo");
+  const [chatMsg, setChatMsg] = useState("");
+  const [chatLevel, setChatLevel] = useState("low");
+  const [chatSending, setChatSending] = useState(false);
+  const [chatLog, setChatLog] = useState<{ role: "user" | "assistant"; content: string }[]>([]);
 
   // ── Load workspaces once ──
   useEffect(() => {
@@ -154,12 +220,18 @@ export default function MemoryDialecticPage() {
     setErr(null);
     const [p, c, s] = await Promise.all([
       api<{ items: Peer[] }>("peers", { workspace }),
-      api<{ items: Conclusion[] }>("conclusions", { workspace }),
-      api<{ items: Session[] }>("sessions", { workspace, peer: "jarvis" }),
+      api<Paged<Conclusion>>("conclusions", { workspace, page: "1", size: String(PAGE_SIZE) }),
+      api<Paged<Session>>("sessions", { workspace, peer: "jarvis", page: "1", size: String(PAGE_SIZE) }),
     ]);
     setPeers(p?.items ?? []);
     setConclusions(c?.items ?? []);
+    setConcTotal(c?.total ?? c?.items?.length ?? 0);
+    setConcPages(Math.max(1, c?.pages ?? 1));
+    setConcPage(1);
     setSessions(s?.items ?? []);
+    setSessTotal(s?.total ?? s?.items?.length ?? 0);
+    setSessPages(Math.max(1, s?.pages ?? 1));
+    setSessPage(1);
     setSelectedPeer(null);
     setSelectedSession(null);
     setPeerCard(null);
@@ -167,6 +239,73 @@ export default function MemoryDialecticPage() {
     setSessionMsgs([]);
     setLoading(false);
   }, []);
+
+  // ── Pagination conclusions ──
+  const gotoConcPage = useCallback(async (page: number) => {
+    if (page < 1 || page > concPages) return;
+    setLoading(true);
+    const c = await api<Paged<Conclusion>>("conclusions", { ws, page: String(page), size: String(PAGE_SIZE) });
+    setConclusions(c?.items ?? []);
+    setConcPage(page);
+    setLoading(false);
+  }, [ws, concPages]);
+
+  // ── Pagination sessions ──
+  const gotoSessPage = useCallback(async (page: number) => {
+    if (page < 1 || page > sessPages) return;
+    setLoading(true);
+    const s = await api<Paged<Session>>("sessions", { ws, peer: "jarvis", page: String(page), size: String(PAGE_SIZE) });
+    setSessions(s?.items ?? []);
+    setSessPage(page);
+    setLoading(false);
+  }, [ws, sessPages]);
+
+  // ── Recherche sémantique ciblée conclusions ──
+  const searchConclusions = useCallback(async () => {
+    const q = concQuery.trim();
+    if (!q) return;
+    setConcSearching(true);
+    // L'API exige observer/observed : on interroge les 2 paires principales
+    // (conclusions "explicit" ludo→ludo + dérivées jarvis→ludo) et on fusionne.
+    const targets = [
+      { observer: chatPeer, observed: chatPeer },
+      { observer: "jarvis", observed: chatPeer },
+    ];
+    const results = await Promise.all(
+      targets.map((t) =>
+        api<Conclusion[]>("conclusions_query", { workspace: ws }, { query: q, top_k: 10, filters: t })
+      )
+    );
+    const seen = new Set<string>();
+    const merged: Conclusion[] = [];
+    for (const r of results) {
+      for (const c of r ?? []) {
+        if (!seen.has(c.id)) {
+          seen.add(c.id);
+          merged.push(c);
+        }
+      }
+    }
+    setConcResults(merged.slice(0, 15));
+    setConcSearching(false);
+  }, [concQuery, ws, chatPeer]);
+
+  // ── Chat dialectic (peer.chat) ──
+  const sendChat = useCallback(async () => {
+    const m = chatMsg.trim();
+    if (!m || chatSending) return;
+    setChatMsg("");
+    setChatLog((log) => [...log, { role: "user", content: m }]);
+    setChatSending(true);
+    const r = await api<{ content?: string; message?: string; [k: string]: unknown }>(
+      "chat",
+      { workspace: ws, peer: chatPeer },
+      { query: m, reasoning_level: chatLevel }
+    );
+    const answer = r?.content || r?.message || (r ? JSON.stringify(r).slice(0, 500) : "Erreur : réponse vide");
+    setChatLog((log) => [...log, { role: "assistant", content: String(answer) }]);
+    setChatSending(false);
+  }, [chatMsg, chatSending, ws, chatPeer, chatLevel]);
 
   useEffect(() => {
     if (ws) void load(ws);
@@ -210,10 +349,10 @@ export default function MemoryDialecticPage() {
   const stats = useMemo(
     () => [
       { label: "Peers", value: peers.length, icon: Users },
-      { label: "Conclusions", value: conclusions.length, icon: Sparkles },
-      { label: "Sessions (jarvis)", value: sessions.length, icon: MessageSquare },
+      { label: "Conclusions", value: concTotal, icon: Sparkles },
+      { label: "Sessions (jarvis)", value: sessTotal, icon: MessageSquare },
     ],
-    [peers, conclusions, sessions]
+    [peers, concTotal, sessTotal]
   );
 
   const cardLines = fmtCard(peerCard?.peer_card ?? peerCard?.card);
@@ -397,15 +536,54 @@ export default function MemoryDialecticPage() {
         <Panel className="p-4">
           <div className="mb-3 flex items-center justify-between">
             <h3 className="text-sm font-semibold text-white">Conclusions</h3>
-            <Pill>{conclusions.length}</Pill>
+            <Pill>{concResults ? `${concResults.length} résultats` : concTotal}</Pill>
           </div>
-          <div className="max-h-[420px] space-y-1.5 overflow-y-auto pr-1">
-            {loading ? (
+          {/* Recherche ciblée */}
+          <div className="mb-3 flex items-center gap-2">
+            <Search className="h-3.5 w-3.5 shrink-0 text-neutral-500" />
+            <input
+              value={concQuery}
+              onChange={(e) => setConcQuery(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && void searchConclusions()}
+              placeholder="Recherche sémantique ciblée…"
+              className="flex-1 bg-transparent text-xs text-white placeholder:text-neutral-500 focus:outline-none"
+            />
+            {concResults && (
+              <button
+                onClick={() => setConcResults(null)}
+                className="rounded bg-white/5 px-2 py-0.5 text-[10px] text-neutral-400 hover:bg-white/10"
+              >
+                × effacer
+              </button>
+            )}
+            <Button
+              onClick={() => void searchConclusions()}
+              disabled={concSearching || !concQuery.trim()}
+              className="!px-2.5 !py-1 !text-xs"
+            >
+              {concSearching ? "…" : "Chercher"}
+            </Button>
+          </div>
+          <div className="max-h-[380px] space-y-1.5 overflow-y-auto pr-1">
+            {loading || concSearching ? (
               <Skeleton className="h-24 w-full" />
+            ) : concResults ? (
+              concResults.length === 0 ? (
+                <p className="text-sm text-neutral-500">Aucune conclusion pertinente.</p>
+              ) : (
+                concResults.map((c) => (
+                  <div key={c.id} className="rounded-lg bg-white/[0.03] p-2.5">
+                    <p className="text-sm leading-snug text-neutral-300">{c.content}</p>
+                    <p className="mt-1 flex items-center gap-1 text-[10px] text-neutral-500">
+                      <Clock className="h-3 w-3" /> {timeAgo(c.created_at)} · {c.level} · {c.observer_id}→{c.observed_id}
+                    </p>
+                  </div>
+                ))
+              )
             ) : conclusions.length === 0 ? (
               <EmptyState icon={<Sparkles className="h-5 w-5" />} title="Aucune conclusion" />
             ) : (
-              conclusions.slice(0, 30).map((c) => (
+              conclusions.map((c) => (
                 <div key={c.id} className="rounded-lg bg-white/[0.03] p-2.5">
                   <p className="text-sm leading-snug text-neutral-300">{c.content}</p>
                   <p className="mt-1 flex items-center gap-1 text-[10px] text-neutral-500">
@@ -415,6 +593,27 @@ export default function MemoryDialecticPage() {
               ))
             )}
           </div>
+          {concPages > 1 && !concResults && (
+            <div className="mt-3 flex items-center justify-between border-t border-white/5 pt-2.5">
+              <button
+                onClick={() => void gotoConcPage(concPage - 1)}
+                disabled={concPage <= 1 || loading}
+                className="rounded-lg bg-white/5 px-2.5 py-1 text-xs text-neutral-300 hover:bg-white/10 disabled:opacity-30"
+              >
+                ◀ Précédent
+              </button>
+              <span className="text-[11px] text-neutral-500">
+                Page {concPage} / {concPages} · {PAGE_SIZE} par page
+              </span>
+              <button
+                onClick={() => void gotoConcPage(concPage + 1)}
+                disabled={concPage >= concPages || loading}
+                className="rounded-lg bg-white/5 px-2.5 py-1 text-xs text-neutral-300 hover:bg-white/10 disabled:opacity-30"
+              >
+                Suivant ▶
+              </button>
+            </div>
+          )}
         </Panel>
       </div>
 
@@ -422,7 +621,10 @@ export default function MemoryDialecticPage() {
       <Panel className="p-4">
         <div className="mb-3 flex items-center justify-between">
           <h3 className="text-sm font-semibold text-white">Sessions (peer jarvis)</h3>
-          <Layers className="h-4 w-4 text-neutral-500" />
+          <div className="flex items-center gap-2">
+            <Layers className="h-4 w-4 text-neutral-500" />
+            <Pill>{sessTotal}</Pill>
+          </div>
         </div>
         <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
           {/* Session list */}
@@ -479,6 +681,102 @@ export default function MemoryDialecticPage() {
               </>
             )}
           </div>
+        </div>
+        {sessPages > 1 && (
+          <div className="mt-3 flex items-center justify-between border-t border-white/5 pt-2.5">
+            <button
+              onClick={() => void gotoSessPage(sessPage - 1)}
+              disabled={sessPage <= 1 || loading}
+              className="rounded-lg bg-white/5 px-2.5 py-1 text-xs text-neutral-300 hover:bg-white/10 disabled:opacity-30"
+            >
+              ◀ Précédent
+            </button>
+            <span className="text-[11px] text-neutral-500">
+              Page {sessPage} / {sessPages} · {PAGE_SIZE} par page
+            </span>
+            <button
+              onClick={() => void gotoSessPage(sessPage + 1)}
+              disabled={sessPage >= sessPages || loading}
+              className="rounded-lg bg-white/5 px-2.5 py-1 text-xs text-neutral-300 hover:bg-white/10 disabled:opacity-30"
+            >
+              Suivant ▶
+            </button>
+          </div>
+        )}
+      </Panel>
+
+      {/* Chat Dialectic */}
+      <Panel className="p-4">
+        <div className="mb-3 flex items-center justify-between">
+          <h3 className="text-sm font-semibold text-white">Chat Dialectic</h3>
+          <div className="flex items-center gap-2">
+            <select
+              value={chatPeer}
+              onChange={(e) => setChatPeer(e.target.value)}
+              className="rounded-lg border border-white/10 bg-white/5 px-2.5 py-1 text-xs text-white"
+            >
+              {peers.map((p) => (
+                <option key={p.id} value={p.id} className="bg-neutral-900">
+                  peer {p.id}
+                </option>
+              ))}
+              {!peers.some((p) => p.id === chatPeer) && (
+                <option value={chatPeer} className="bg-neutral-900">
+                  peer {chatPeer}
+                </option>
+              )}
+            </select>
+            <select
+              value={chatLevel}
+              onChange={(e) => setChatLevel(e.target.value)}
+              className="rounded-lg border border-white/10 bg-white/5 px-2.5 py-1 text-xs text-white"
+            >
+              {["minimal", "low", "medium", "high", "max"].map((l) => (
+                <option key={l} value={l} className="bg-neutral-900">
+                  {l}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+        <p className="mb-3 text-xs text-neutral-500">
+          Pose une question à la mémoire Honcho — le dialectic répond en s'appuyant sur les conclusions, la carte et les messages du peer.
+        </p>
+        <div className="max-h-[320px] space-y-2 overflow-y-auto pr-1 rounded-lg bg-white/[0.02] p-3">
+          {chatLog.length === 0 ? (
+            <p className="text-sm text-neutral-500">Aucun échange. Essaie « Quels sont les goûts musicaux de Ludo ? »</p>
+          ) : (
+            chatLog.map((m, i) => (
+              <div
+                key={i}
+                className={`rounded-lg p-2.5 text-xs leading-relaxed whitespace-pre-wrap ${
+                  m.role === "user"
+                    ? "bg-blue-500/10 text-blue-200"
+                    : "bg-white/[0.03] text-neutral-300"
+                }`}
+              >
+                {m.role === "assistant" ? renderMarkdown(m.content) : m.content}
+              </div>
+            ))
+          )}
+          {chatSending && (
+            <div className="flex items-center gap-2 text-xs text-neutral-500">
+              <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+              Le dialectic réfléchit…
+            </div>
+          )}
+        </div>
+        <div className="mt-3 flex items-center gap-2">
+          <input
+            value={chatMsg}
+            onChange={(e) => setChatMsg(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && void sendChat()}
+            placeholder="Ta question à la mémoire…"
+            className="flex-1 rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm text-white placeholder:text-neutral-500 focus:outline-none focus:border-white/20"
+          />
+          <Button onClick={() => void sendChat()} disabled={chatSending || !chatMsg.trim()}>
+            {chatSending ? "…" : "Envoyer"}
+          </Button>
         </div>
       </Panel>
     </div>
