@@ -140,13 +140,13 @@ async function mirrorKanban() {
     if (!id) continue;
     seen.add(id);
     await q(
-      `INSERT INTO "HermesTask" (id, board, title, assignee, status, priority, result, "updatedAt", "syncedAt")
-       VALUES ($1,$2,$3,$4,$5,$6,$7, now(), now())
+      `INSERT INTO "HermesTask" (id, board, title, body, assignee, status, priority, result, "updatedAt", "syncedAt")
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8, now(), now())
        ON CONFLICT (id) DO UPDATE SET
-         title=EXCLUDED.title, assignee=EXCLUDED.assignee, status=EXCLUDED.status,
+         title=EXCLUDED.title, body=EXCLUDED.body, assignee=EXCLUDED.assignee, status=EXCLUDED.status,
          priority=EXCLUDED.priority, result=EXCLUDED.result, "syncedAt"=now()`,
-      [id, BOARD, String(t.title ?? "untitled").slice(0, 300), t.assignee ?? null,
-       String(t.status ?? "todo"), t.priority != null ? Number(t.priority) : null,
+      [id, BOARD, String(t.title ?? "untitled").slice(0, 300), t.body ? String(t.body).slice(0, 4000) : null,
+       t.assignee ?? null, String(t.status ?? "todo"), t.priority != null ? Number(t.priority) : null,
        t.result ? String(t.result).slice(0, 2000) : null]
     );
   }
@@ -155,6 +155,18 @@ async function mirrorKanban() {
     await q(`DELETE FROM "HermesTask" WHERE board=$1 AND id <> ALL($2::text[])`, [BOARD, [...seen]]);
   } else {
     await q(`DELETE FROM "HermesTask" WHERE board=$1`, [BOARD]);
+  }
+
+  // ── Détails des cartes bloquées (comments + raison de blocage) ──
+  // Un show par carte bloquée (peu nombreuses) — stocké en JSON pour l'UI de validation.
+  const blocked = tasks.filter((t) => String(t.status ?? "") === "blocked");
+  for (const t of blocked) {
+    const id = String(t.id ?? t.task_id ?? "");
+    if (!id) continue;
+    try {
+      const out = await hermes(["kanban", "--board", BOARD, "show", id], { timeout: 15000 });
+      await q(`UPDATE "HermesTask" SET detail=$1, "syncedAt"=now() WHERE id=$2`, [String(out).slice(0, 8000), id]);
+    } catch (e) { log("kanban show failed:", String(e.message || e).split("\n")[0]); }
   }
 }
 
@@ -319,6 +331,12 @@ async function runRequest(r) {
       const args = ["kanban", "--board", BOARD, "block", "--kind", "needs_input", String(meta.task_id)];
       if (meta.reason) args.push(String(meta.reason));
       result = (await hermes(args, { timeout: 20000 })).trim();
+    } else if (r.kind === "kanban.show") {
+      // Détail complet d'une carte (body, comments, events, runs) — prompt = JSON {task_id}
+      let meta = {};
+      try { meta = r.prompt ? JSON.parse(r.prompt) : {}; } catch { meta = {}; }
+      if (!meta.task_id) throw new Error("task_id required for kanban.show");
+      result = (await hermes(["kanban", "--board", BOARD, "show", String(meta.task_id)], { timeout: 20000 })).trim();
     } else if (r.kind.startsWith("cron.")) {
       const op = r.kind.split(".")[1];
       const a = JSON.parse(r.prompt || "{}");
