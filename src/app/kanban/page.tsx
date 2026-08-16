@@ -13,6 +13,8 @@ import {
   UserCog,
   Flag,
   CircleCheck,
+  ChevronDown,
+  ChevronRight,
 } from "lucide-react";
 import {
   Panel,
@@ -560,6 +562,11 @@ function Board({ tasks, selectedId, onSelect }: { tasks: Task[]; selectedId: str
   }
   const cols = COLUMN_ORDER.filter((c) => groups[c]?.length);
 
+  // Colonnes repliées par défaut : « done » est repliée (elle prend de la place,
+  // on suit surtout le travail en cours). Cliquer sur l'en-tête replie/déplie.
+  const [collapsed, setCollapsed] = useState<Record<string, boolean>>({ done: true });
+  const toggleCol = (col: string) => setCollapsed((c) => ({ ...c, [col]: !c[col] }));
+
   if (tasks.length === 0) {
     return (
       <Panel className="p-2">
@@ -576,45 +583,60 @@ function Board({ tasks, selectedId, onSelect }: { tasks: Task[]; selectedId: str
     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
       {cols.map((col) => {
         const tone = columnTone(col);
+        const isCollapsed = !!collapsed[col];
         return (
           <div key={col} className="flex flex-col gap-2.5">
-            <div className="flex items-center justify-between px-1">
-              <Eyebrow>{COLUMN_LABEL[col]}</Eyebrow>
+            <button
+              type="button"
+              onClick={() => toggleCol(col)}
+              title={isCollapsed ? `Déplier ${COLUMN_LABEL[col]}` : `Replier ${COLUMN_LABEL[col]}`}
+              className="flex items-center justify-between px-1 w-full text-left group cursor-pointer"
+            >
+              <span className="flex items-center gap-1">
+                {isCollapsed ? (
+                  <ChevronRight className="w-3.5 h-3.5 text-[var(--text-3)] group-hover:text-[var(--text-2)] transition-colors" />
+                ) : (
+                  <ChevronDown className="w-3.5 h-3.5 text-[var(--text-3)] group-hover:text-[var(--text-2)] transition-colors" />
+                )}
+                <Eyebrow>{COLUMN_LABEL[col]}</Eyebrow>
+              </span>
               <span className="num text-[11px] text-[var(--text-3)]">{groups[col].length}</span>
-            </div>
-            <div className="flex flex-col gap-2.5">
-              {groups[col]
-                .sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0))
-                .map((t) => (
-                  <button
-                    key={t.id}
-                    type="button"
-                    onClick={() => onSelect(t.id)}
-                    className="panel p-3.5 text-left cursor-pointer transition-opacity hover:opacity-90"
-                    style={{
-                      borderLeft: `2px solid color-mix(in srgb, ${
-                        tone === "neutral" ? "var(--text-3)" : `var(--${tone})`
-                      } 55%, transparent)`,
-                      outline: selectedId === t.id ? "1px solid color-mix(in srgb, var(--accent) 50%, transparent)" : undefined,
-                    }}
-                  >
-                    <p className="text-[13px] text-[var(--text)] leading-snug line-clamp-2">{t.title}</p>
-                    <div className="flex items-center gap-2 mt-2.5">
-                      {t.assignee && (
-                        <span className="num text-[10.5px] text-[var(--text-3)]">{t.assignee}</span>
-                      )}
-                      {t.status === "blocked" && (
-                        <span className="inline-flex items-center gap-1 text-[10px] text-[var(--warn, #eab308)]">
-                          <ShieldAlert className="w-3 h-3" /> en attente
-                        </span>
-                      )}
-                      {t.priority != null && t.priority > 0 && (
-                        <span className="num text-[10.5px] text-[var(--text-3)] ml-auto">P{t.priority}</span>
-                      )}
-                    </div>
-                  </button>
-                ))}
-            </div>
+            </button>
+            {!isCollapsed && (
+              <div className="flex flex-col gap-2.5">
+                {groups[col]
+                  .sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0))
+                  .map((t) => (
+                    <button
+                      key={t.id}
+                      type="button"
+                      onClick={() => onSelect(t.id)}
+                      className="panel p-3.5 text-left cursor-pointer transition-opacity hover:opacity-90"
+                      style={{
+                        borderLeft: `2px solid color-mix(in srgb, ${
+                          tone === "neutral" ? "var(--text-3)" : `var(--${tone})`
+                        } 55%, transparent)`,
+                        outline: selectedId === t.id ? "1px solid color-mix(in srgb, var(--accent) 50%, transparent)" : undefined,
+                      }}
+                    >
+                      <p className="text-[13px] text-[var(--text)] leading-snug line-clamp-2">{t.title}</p>
+                      <div className="flex items-center gap-2 mt-2.5">
+                        {t.assignee && (
+                          <span className="num text-[10.5px] text-[var(--text-3)]">{t.assignee}</span>
+                        )}
+                        {t.status === "blocked" && (
+                          <span className="inline-flex items-center gap-1 text-[10px] text-[var(--warn, #eab308)]">
+                            <ShieldAlert className="w-3 h-3" /> en attente
+                          </span>
+                        )}
+                        {t.priority != null && t.priority > 0 && (
+                          <span className="num text-[10.5px] text-[var(--text-3)] ml-auto">P{t.priority}</span>
+                        )}
+                      </div>
+                    </button>
+                  ))}
+              </div>
+            )}
           </div>
         );
       })}
