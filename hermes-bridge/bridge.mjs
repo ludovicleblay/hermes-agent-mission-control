@@ -165,7 +165,7 @@ async function mirrorKanban() {
     if (!id) continue;
     try {
       const out = await hermes(["kanban", "--board", BOARD, "show", id], { timeout: 15000 });
-      await q(`UPDATE "HermesTask" SET detail=$1, "syncedAt"=now() WHERE id=$2`, [String(out).slice(0, 8000), id]);
+      await q(`UPDATE "HermesTask" SET detail=$1, "syncedAt"=now() WHERE id=$2`, [String(out).slice(0, 30000), id]);
     } catch (e) { log("kanban show failed:", String(e.message || e).split("\n")[0]); }
   }
 }
@@ -308,7 +308,10 @@ async function runRequest(r) {
       let meta = {};
       try { meta = r.prompt ? JSON.parse(r.prompt) : {}; } catch { meta = { body: r.prompt }; }
       const args = ["kanban", "--board", BOARD, "create", "--json"];
-      if (meta.assignee) args.push("--assignee", String(meta.assignee));
+      // Assignee par défaut : jarvis (le profil worker qui a le skill kanban-risk-validation).
+      // "" (triage) ou absent → jarvis, sinon le profil demandé (ex. toad).
+      const worker = String(meta.assignee ?? "").trim() || "jarvis";
+      if (worker) args.push("--assignee", worker);
       if (meta.priority != null) args.push("--priority", String(meta.priority));
       if (meta.body) args.push("--body", String(meta.body));
       // Consigne systémique de validation des tâches risquées — épinglée à chaque carte
@@ -316,10 +319,15 @@ async function runRequest(r) {
       args.push(r.title);
       result = (await hermes(args, { timeout: 20000 })).trim();
     } else if (r.kind === "kanban.unblock") {
-      // Validation humaine : débloque une carte bloquée (needs_input) — prompt = JSON {task_id, reason?}
+      // Validation humaine : débloque une carte bloquée (needs_input) — prompt = JSON {task_id, reason?, direction?}
       let meta = {};
       try { meta = r.prompt ? JSON.parse(r.prompt) : {}; } catch { meta = {}; }
       if (!meta.task_id) throw new Error("task_id required for kanban.unblock");
+      // Consigne libre de l'humain → postée comme commentaire sur la carte avant déblocage
+      if (meta.direction && String(meta.direction).trim()) {
+        const dir = String(meta.direction).trim().slice(0, 4000);
+        await hermes(["kanban", "--board", BOARD, "comment", String(meta.task_id), "--author", "Ludo", dir], { timeout: 15000 }).catch((e) => log("kanban comment (direction) failed:", String(e.message || e).split("\n")[0]));
+      }
       const args = ["kanban", "--board", BOARD, "unblock", String(meta.task_id)];
       if (meta.reason) args.push("--reason", String(meta.reason));
       result = (await hermes(args, { timeout: 20000 })).trim();
