@@ -299,7 +299,25 @@ async function runRequest(r) {
       if (meta.assignee) args.push("--assignee", String(meta.assignee));
       if (meta.priority != null) args.push("--priority", String(meta.priority));
       if (meta.body) args.push("--body", String(meta.body));
+      // Consigne systémique de validation des tâches risquées — épinglée à chaque carte
+      args.push("--skill", "kanban-risk-validation");
       args.push(r.title);
+      result = (await hermes(args, { timeout: 20000 })).trim();
+    } else if (r.kind === "kanban.unblock") {
+      // Validation humaine : débloque une carte bloquée (needs_input) — prompt = JSON {task_id, reason?}
+      let meta = {};
+      try { meta = r.prompt ? JSON.parse(r.prompt) : {}; } catch { meta = {}; }
+      if (!meta.task_id) throw new Error("task_id required for kanban.unblock");
+      const args = ["kanban", "--board", BOARD, "unblock", String(meta.task_id)];
+      if (meta.reason) args.push("--reason", String(meta.reason));
+      result = (await hermes(args, { timeout: 20000 })).trim();
+    } else if (r.kind === "kanban.block") {
+      // Blocage manuel (utilisé par l'UI pour suspendre une carte) — prompt = JSON {task_id, reason?}
+      let meta = {};
+      try { meta = r.prompt ? JSON.parse(r.prompt) : {}; } catch { meta = {}; }
+      if (!meta.task_id) throw new Error("task_id required for kanban.block");
+      const args = ["kanban", "--board", BOARD, "block", "--kind", "needs_input", String(meta.task_id)];
+      if (meta.reason) args.push(String(meta.reason));
       result = (await hermes(args, { timeout: 20000 })).trim();
     } else if (r.kind.startsWith("cron.")) {
       const op = r.kind.split(".")[1];
