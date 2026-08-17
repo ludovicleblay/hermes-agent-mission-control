@@ -43,6 +43,78 @@ function parseTitle(title: string): { date: string; label: string } {
   return { date: "", label: title };
 }
 
+// Auto-link URLs nues (avec ou sans schéma) dans un texte brut → <a>
+function autoLink(text: string, keyPrefix: string): React.ReactNode[] {
+  const LABEL = "[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?";
+  const PATH = "[A-Za-z0-9\\-._~:/?#@!$&()*+,;=%]";
+  const urlRe = new RegExp(
+    "(https?:\\/\\/" + PATH + "+" +
+    "|(?:" + LABEL + "\\.)+[a-zA-Z]{3,}(?::\\d{1,5})?(?:\\/" + PATH + "*)?" +
+    "|(?:" + LABEL + "\\.)+[a-zA-Z]{2}(?::\\d{1,5})\\/" + PATH + "+" +
+    "|(?:" + LABEL + "\\.)+[a-zA-Z]{2}\\/" + PATH + "+" +
+    ")",
+    "g"
+  );
+  const parts: React.ReactNode[] = [];
+  let last = 0;
+  let m: RegExpExecArray | null;
+  let n = 0;
+  while ((m = urlRe.exec(text)) !== null) {
+    if (m.index > last) parts.push(text.slice(last, m.index));
+    let url = m[0].replace(/[.,;:!?)\]}'"·]+$/, "");
+    const href = /^https?:\/\//i.test(url) ? url : `https://${url}`;
+    parts.push(
+      <a
+        key={`${keyPrefix}-u${n++}`}
+        href={href}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="text-[var(--accent)] underline underline-offset-2 decoration-[var(--accent)]/50 hover:decoration-[var(--accent)] transition-colors break-all"
+      >
+        {url}
+      </a>
+    );
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) parts.push(text.slice(last));
+  return parts.length ? parts : [text];
+}
+
+// Rendu inline : liens markdown [titre](url) → <a>, URLs nues → <a>, gras **x** → <strong>, code `x` → <code>
+function renderInline(text: string, keyPrefix: string): React.ReactNode[] {
+  const parts = text.split(/(\[[^\]]+\]\([^)]+\)|\*\*[^*]+\*\*|`[^`]+`)/g);
+  return parts.flatMap((part, i) => {
+    const k = `${keyPrefix}-${i}`;
+    const link = part.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
+    if (link) {
+      const url = link[2].trim();
+      const safe = /^https?:\/\//i.test(url) || url.startsWith("/") ? url : "#";
+      return (
+        <a
+          key={k}
+          href={safe}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-[var(--accent)] underline underline-offset-2 decoration-[var(--accent)]/50 hover:decoration-[var(--accent)] transition-colors"
+        >
+          {link[1]}
+        </a>
+      );
+    }
+    if (part.startsWith("**") && part.endsWith("**") && part.length > 4) {
+      return <strong key={k} className="font-semibold">{part.slice(2, -2)}</strong>;
+    }
+    if (part.startsWith("`") && part.endsWith("`") && part.length > 2) {
+      return (
+        <code key={k} className="px-1 py-0.5 rounded bg-[var(--surface-2)] text-[12.5px] font-mono text-[var(--text-2)]">
+          {part.slice(1, -1)}
+        </code>
+      );
+    }
+    return autoLink(part, k);
+  });
+}
+
 // Rendu markdown léger : headers, gras, listes, séparateurs → blocs simples
 function renderMarkdown(md: string): React.ReactNode[] {
   const lines = md.split("\n");
@@ -57,7 +129,7 @@ function renderMarkdown(md: string): React.ReactNode[] {
           {list.map((li, i) => (
             <li key={i} className="flex gap-2 text-[13.5px] leading-relaxed">
               <span className="text-[var(--accent)] shrink-0">•</span>
-              <span>{li}</span>
+              <span className="min-w-0">{renderInline(li, `li-${key}-${i}`)}</span>
             </li>
           ))}
         </ul>
@@ -78,9 +150,7 @@ function renderMarkdown(md: string): React.ReactNode[] {
       continue;
     }
     flushList();
-    const clean = line
-      .replace(/\*\*(.*?)\*\*/g, (_, s) => `**${s}**`)
-      .replace(/`(.*?)`/g, "$1");
+    const clean = line.replace(/`(.*?)`/g, "$1");
     if (/^#{1,3}\s/.test(clean)) {
       const m = clean.match(/^(#{1,3})\s/);
       const level = m ? m[1].length : 1;
@@ -88,13 +158,13 @@ function renderMarkdown(md: string): React.ReactNode[] {
       if (level === 1) {
         out.push(
           <h2 key={key++} className="text-[15px] font-bold mt-5 mb-2 text-[var(--text)] tracking-[-0.01em]">
-            {text}
+            {renderInline(text, `h2-${key}`)}
           </h2>
         );
       } else {
         out.push(
           <h3 key={key++} className="text-[13.5px] font-semibold mt-4 mb-1.5 text-[var(--text-2)]">
-            {text}
+            {renderInline(text, `h3-${key}`)}
           </h3>
         );
       }
@@ -103,7 +173,7 @@ function renderMarkdown(md: string): React.ReactNode[] {
     } else {
       out.push(
         <p key={key++} className="text-[13.5px] leading-relaxed my-1">
-          {clean}
+          {renderInline(clean, `p-${key}`)}
         </p>
       );
     }
